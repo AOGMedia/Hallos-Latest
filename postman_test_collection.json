@@ -1,0 +1,215 @@
+{
+  "info": {
+    "name": "Hallos Creator Platform - Test Suite",
+    "description": "Test collection for course purchase, coupon, and wallet features",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://hallos-backend.onrender.com"
+    },
+    {
+      "key": "auth_token",
+      "value": ""
+    },
+    {
+      "key": "course_id",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health Check - Get Departments",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/courses/departments"
+      }
+    },
+    {
+      "name": "2. Register Test User",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/auth/register",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"fullName\": \"Test User\",\n  \"email\": \"testuser@example.com\",\n  \"password\": \"***\"\n}"
+        }
+      }
+    },
+    {
+      "name": "3. Login",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": "{{base_url}}/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"testuser@example.com\",\n  \"password\": \"***\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const data = pm.response.json();",
+              "if (data.token) { pm.collectionVariables.set('auth_token', data.token); }"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Search Courses",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/courses/search?q=marketing"
+      }
+    },
+    {
+      "name": "5. Get Course By ID",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/api/courses/{{course_id}}"
+      }
+    },
+    {
+      "name": "6. Purchase Course - Individual (NGN)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "test-individual-ngn-001"
+          }
+        ],
+        "url": "{{base_url}}/api/courses/purchase",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accessType\": \"individual\",\n  \"courseId\": \"{{course_id}}\",\n  \"currency\": \"NGN\",\n  \"studentName\": \"Test User\",\n  \"studentEmail\": \"testuser@example.com\",\n  \"studentPhone\": \"08012345678\"\n}"
+        }
+      }
+    },
+    {
+      "name": "7. Purchase - Monthly Pass (USD)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "test-monthly-usd-001"
+          }
+        ],
+        "url": "{{base_url}}/api/courses/purchase",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accessType\": \"monthly\",\n  \"currency\": \"USD\",\n  \"studentName\": \"Test User\",\n  \"studentEmail\": \"testuser@example.com\",\n  \"studentPhone\": \"08012345678\"\n}"
+        }
+      }
+    },
+    {
+      "name": "8. Purchase with Coupon Code",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "test-coupon-001"
+          }
+        ],
+        "url": "{{base_url}}/api/courses/purchase",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accessType\": \"individual\",\n  \"courseId\": \"{{course_id}}\",\n  \"currency\": \"NGN\",\n  \"couponCode\": \"VALENTINE2025\",\n  \"studentName\": \"Test User\",\n  \"studentEmail\": \"testuser@example.com\",\n  \"studentPhone\": \"08012345678\"\n}"
+        }
+      }
+    },
+    {
+      "name": "9. Get My Enrollments",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          }
+        ],
+        "url": "{{base_url}}/api/courses/my-enrollments"
+      }
+    },
+    {
+      "name": "10. Get Wallet Balances",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          }
+        ],
+        "url": "{{base_url}}/api/wallet/balances"
+      }
+    },
+    {
+      "name": "11. Duplicate Enrollment Check (should 409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Authorization",
+            "value": "Bearer {{auth_token}}"
+          },
+          {
+            "key": "Idempotency-Key",
+            "value": "test-individual-ngn-001-dup"
+          }
+        ],
+        "url": "{{base_url}}/api/courses/purchase",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accessType\": \"individual\",\n  \"courseId\": \"{{course_id}}\",\n  \"currency\": \"NGN\",\n  \"studentName\": \"Test User\",\n  \"studentEmail\": \"testuser@example.com\",\n  \"studentPhone\": \"08012345678\"\n}"
+        }
+      }
+    }
+  ]
+}

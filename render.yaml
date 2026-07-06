@@ -1,0 +1,185 @@
+services:
+  - type: redis
+    name: hallos-redis
+    plan: free
+    ipAllowList: []
+
+  - type: web
+    name: hallos-backend
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/courses/departments
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 8080
+      - key: JWT_SECRET_KEY
+        sync: false          # Set manually in Render dashboard
+      - key: SESSION_SECRET
+        sync: false
+      - key: DB_NAME
+        fromDatabase:
+          name: hallos-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: hallos-db
+          property: user
+      - key: DB_PASS
+        fromDatabase:
+          name: hallos-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: hallos-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: hallos-db
+          property: port
+      - key: REDIS_HOST
+        fromService:
+          name: hallos-redis
+          type: redis
+          property: host
+      - key: REDIS_PORT
+        fromService:
+          name: hallos-redis
+          type: redis
+          property: port
+      - key: REDIS_PASSWORD
+        fromService:
+          name: hallos-redis
+          type: redis
+          property: password
+      # Payment gateways - set in dashboard (use TEST keys for testing)
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_PUBLIC_KEY
+        sync: false
+      # Pricing
+      - key: COURSE_PRICE_INDIVIDUAL_NGN
+        value: "25000"
+      - key: COURSE_PRICE_MONTHLY_NGN
+        value: "35000"
+      - key: COURSE_PRICE_YEARLY_NGN
+        value: "280000"
+      - key: COURSE_PRICE_INDIVIDUAL_USD
+        value: "30"
+      - key: COURSE_PRICE_MONTHLY_USD
+        value: "42"
+      - key: COURSE_PRICE_YEARLY_USD
+        value: "336"
+      - key: PROMO_PRICE_INDIVIDUAL_NGN
+        value: "20000"
+      - key: PROMO_PRICE_MONTHLY_NGN
+        value: "25000"
+      - key: PROMO_PRICE_YEARLY_NGN
+        value: "250000"
+      - key: PROMO_PRICE_INDIVIDUAL_USD
+        value: "24"
+      - key: PROMO_PRICE_MONTHLY_USD
+        value: "30"
+      - key: PROMO_PRICE_YEARLY_USD
+        value: "300"
+      - key: CURRENCY_CONVERSION_RATE_NGN_TO_USD
+        value: "1400"
+      - key: NOTIFICATIONS_ENABLED
+        value: "false"
+      # Stub values for services not needed in testing
+      - key: MUX_TOKEN_ID
+        value: "stub"
+      - key: MUX_TOKEN_SECRET
+        value: "stub"
+      - key: MUX_SECRET_KEY
+        value: "stub"
+      - key: MUX_WEBHOOK_SECRET
+        value: "stub"
+      - key: AWS_ACCESS_KEY_ID
+        value: "stub"
+      - key: AWS_SECRET_ACCESS_KEY
+        value: "stub"
+      - key: AWS_REGION
+        value: "us-east-1"
+      - key: AWS_S3_BUCKET
+        value: "stub"
+      - key: ZEGO_APP_ID
+        value: "0"
+      - key: ZEGO_SERVER_SECRET
+        value: "stub"
+      - key: ZEGO_APP_SIGN
+        value: "stub"
+      - key: ZEGO_ENVIRONMENT
+        value: "production"
+      - key: ZEGO_TOKEN_EXPIRY
+        value: "3600"
+      - key: ZEGO_MAX_PARTICIPANTS
+        value: "200"
+      - key: QUIZ_INITIAL_BONUS
+        value: "100"
+      - key: QUIZ_MIN_WITHDRAWAL_CHUTA
+        value: "1000"
+      - key: QUIZ_WITHDRAWAL_FEE_PERCENT
+        value: "10"
+      - key: QUIZ_ACTIVE_USER_TIMEOUT
+        value: "180"
+      - key: QUIZ_RATE_LIMIT_ANSWERS_PER_WINDOW
+        value: "15"
+      - key: QUIZ_RATE_LIMIT_ANSWERS_WINDOW_SECONDS
+        value: "10"
+      - key: QUIZ_RATE_LIMIT_CHALLENGES_PER_WINDOW
+        value: "10"
+      - key: QUIZ_RATE_LIMIT_CHALLENGES_WINDOW_SECONDS
+        value: "3600"
+      - key: QUIZ_RATE_LIMIT_TOURNAMENTS_PER_WINDOW
+        value: "20"
+      - key: QUIZ_RATE_LIMIT_TOURNAMENTS_WINDOW_SECONDS
+        value: "3600"
+      - key: QUIZ_QUESTIONS_PER_MATCH
+        value: "10"
+      - key: QUIZ_TIME_PER_QUESTION_SECONDS
+        value: "10"
+      - key: QUIZ_LATENCY_BUFFER_SECONDS
+        value: "2"
+      - key: QUIZ_LEADERBOARD_CACHE_TTL
+        value: "300"
+      - key: QUIZ_CHALLENGE_EXPIRATION_HOURS
+        value: "24"
+      - key: QUIZ_RECONNECTION_GRACE_PERIOD
+        value: "30"
+      - key: QUIZ_SUSPICIOUS_ACTIVITY_THRESHOLD
+        value: "5"
+      - key: PARTNER_NIGERIAN_TEACHERS_USER_ID
+        value: "1"
+      - key: EVENT_DATE
+        value: "February 12, 2026"
+      - key: EVENT_TIME
+        value: "3:00PM"
+      - key: GOOGLE_CLIENT_ID
+        value: "stub"
+      - key: GOOGLE_CLIENT_SECRET
+        value: "stub"
+      - key: GOOGLE_CALLBACK_URL
+        value: "https://hallos-backend.onrender.com/auth/google/callback"
+      - key: CLIENT_URL
+        value: "https://hallos-frontend.onrender.com"
+      - key: EMAIL_HOST
+        value: "stub"
+      - key: EMAIL_PORT
+        value: "465"
+      - key: EMAIL_SECURE
+        value: "true"
+      - key: EMAIL_USER
+        value: "stub@stub.com"
+      - key: EMAIL_PASS
+        value: "stub"
+
+databases:
+  - name: hallos-db
+    plan: free
