@@ -436,6 +436,29 @@ router.get('/lobby/players', authMiddleware, async (req, res, next) => {
   }
 });
 
+/**
+ * @route   GET /api/quiz/lobby/players/available
+ * @desc    Get paginated list of players who are online AND not in an active/pending match.
+ *          Only available players can receive a challenge invite.
+ *          Excludes the requesting user.
+ * @access  Private
+ * @query   page (default 1), limit (default 12)
+ */
+router.get('/lobby/players/available', authMiddleware, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12));
+
+    const websocketManager = require('../services/websocketManager');
+    const result = await websocketManager.getAvailablePlayers(userId, page, limit);
+
+    res.json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ==================== ERROR HANDLER ====================
 // Must be last - catches all errors from quiz routes
 router.use(quizErrorHandler);

@@ -7,6 +7,7 @@ const questionService = require('./questionService');
 const quizWalletService = require('./quizWalletService');
 const answerValidationService = require('./answerValidationService');
 const suspiciousActivityService = require('./suspiciousActivityService');
+const activeUserTracker = require('./activeUserTracker');
 
 /**
  * Lobby Service
@@ -77,6 +78,28 @@ class LobbyService {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRegex.test(categoryId)) {
       throw new Error('categoryId must be a valid UUID. Call GET /api/quiz/categories to get valid category IDs.');
+    }
+
+    // If targeting a specific opponent, verify they are currently online
+    if (opponentId) {
+      const isOnline = await activeUserTracker.isUserActive(opponentId);
+      if (!isOnline) {
+        throw new Error('This player is not currently online. You can only invite players who are online.');
+      }
+
+      // Also verify opponent is not already in an active match
+      const activeOpponentMatch = await QuizMatch.findOne({
+        where: {
+          status: { [Op.in]: ['active', 'pending'] },
+          [Op.or]: [
+            { challengerId: opponentId },
+            sequelize.literal(`participants @> '[{"userId": ${Number(opponentId)}}]'`)
+          ]
+        }
+      });
+      if (activeOpponentMatch) {
+        throw new Error('This player is already in a match. Please choose another player.');
+      }
     }
 
     // Verify user balance

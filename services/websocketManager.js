@@ -560,6 +560,88 @@ class WebSocketManager {
   }
 
   /**
+   * Get paginated list of players who are online AND not in an active/pending match.
+   * These are the only players that can receive a challenge invite.
+   * @param {number} requestingUserId - Excluded from results
+   * @param {number} page
+   * @param {number} limit
+   */
+  async getAvailablePlayers(requestingUserId, page = 1, limit = 12) {
+    const UserQuizStats = require('../models/UserQuizStats');
+    const QuizMatch = require('../models/QuizMatch');
+    const quizWalletService = require('./quizWalletService');
+    const { Op } = require('sequelize');
+
+    // Step 1: All online users except requesting user
+    const allActiveIds = await activeUserTracker.getActiveUserIds();
+    const onlineIds = allActiveIds.filter(id => id !== requestingUserId);
+
+    if (onlineIds.length === 0) {
+      return { players: [], total: 0, page, totalPages: 0 };
+    }
+
+    // Step 2: Find users who are currently in an active or pending match
+    const busyMatches = await QuizMatch.findAll({
+      where: {
+        status: { [Op.in]: ['active', 'pending'] },
+        challengerId: { [Op.in]: onlineIds }
+      },
+      attributes: ['challengerId', 'opponentId', 'participants']
+    });
+
+    const busyUserIds = new Set();
+    busyMatches.forEach(m => {
+      if (m.challengerId) busyUserIds.add(Number(m.challengerId));
+      if (m.opponentId) busyUserIds.add(Number(m.opponentId));
+      const parts = Array.isArray(m.participants) ? m.participants : [];
+      parts.forEach(p => { if (p.userId) busyUserIds.add(Number(p.userId)); });
+    });
+
+    // Step 3: Available = online and not busy
+    const availableIds = onlineIds.filter(id => !busyUserIds.has(Number(id)));
+    const total = availableIds.length;
+
+    // Step 4: Paginate
+    const offset = (page - 1) * limit;
+    const pageIds = availableIds.slice(offset, offset + limit);
+
+    if (pageIds.length === 0) {
+      return { players: [], total, page, totalPages: Math.ceil(total / limit) };
+    }
+
+    // Step 5: Enrich with stats
+    const stats = await UserQuizStats.findAll({
+      where: { userId: { [Op.in]: pageIds } },
+      attributes: ['userId', 'nickname', 'avatarUrl', 'lobbyStats']
+    });
+    const statsMap = {};
+    stats.forEach(s => { statsMap[s.userId] = s; });
+
+    const balances = await Promise.all(
+      pageIds.map(id => quizWalletService.getBalance(id).catch(() => 0))
+    );
+
+    const players = pageIds.map((id, index) => {
+      const s = statsMap[id];
+      const lobbyStats = s?.lobbyStats || {};
+      return {
+        userId: id,
+        nickname: s?.nickname || `Player_${id}`,
+        avatarUrl: s?.avatarUrl || null,
+        chutaBalance: balances[index] || 0,
+        wins: lobbyStats.wins || 0,
+        losses: lobbyStats.losses || 0,
+        winRate: lobbyStats.winRate || 0,
+        totalWinnings: lobbyStats.totalWinnings || 0,
+        isOnline: true,
+        isAvailable: true
+      };
+    });
+
+    return { players, total, page, totalPages: Math.ceil(total / limit) };
+  }
+
+  /**
    * Handle socket disconnection
    */
   handleDisconnection(socket) {
