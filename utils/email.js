@@ -1555,3 +1555,54 @@ exports.sendDigestEmail = async (to, firstname, items, digestType) => {
     html
   });
 };
+
+/**
+ * QUIZ INVITE EMAIL
+ * Sent when a user invites a friend to join the quiz platform / a challenge.
+ */
+exports.sendQuizInviteEmail = async (to, inviterName, inviteUrl) => {
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 8px 8px 0 0;">
+        <h1 style="color: white; margin: 0; font-size: 26px;">🎮 You've Been Challenged!</h1>
+      </div>
+
+      <div style="padding: 30px; background-color: #ffffff;">
+        <p style="font-size: 18px; color: #333;">Hi there,</p>
+
+        <p style="font-size: 16px; line-height: 1.8; color: #555;">
+          <strong>${inviterName}</strong> just invited you to join them for a live quiz challenge on
+          <strong>hallos</strong> — test your knowledge, compete for Chuta coins, and have fun!
+        </p>
+
+        <div style="text-align: center; margin: 35px 0;">
+          <a href="${inviteUrl}" style="background-color: #667eea; color: white; padding: 15px 40px; text-decoration: none; border-radius: 25px; font-weight: bold; display: inline-block; font-size: 16px;">
+            Join the Quiz Now
+          </a>
+        </div>
+
+        <p style="font-size: 14px; color: #888; text-align: center;">
+          Or copy this link into your browser: <a href="${inviteUrl}">${inviteUrl}</a>
+        </p>
+
+        <p style="font-size: 16px; line-height: 1.8; color: #555; margin-top: 30px;">
+          See you in the lobby! 🏆
+        </p>
+
+        <p style="font-size: 16px; margin-top: 30px;">
+          <strong>The hallos Team</strong>
+        </p>
+      </div>
+
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Quiz" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `${inviterName} challenged you to a quiz on hallos! 🎮`,
+    html,
+  });
+};
+

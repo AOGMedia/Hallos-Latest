@@ -179,6 +179,12 @@ services:
         value: "stub@stub.com"
       - key: EMAIL_PASS
         value: "stub"
+      - key: TWILIO_ACCOUNT_SID
+        value: "stub"
+      - key: TWILIO_AUTH_TOKEN
+        value: "stub"
+      - key: TWILIO_PHONE_NUMBER
+        value: "stub"
 
 databases:
   - name: hallos-db

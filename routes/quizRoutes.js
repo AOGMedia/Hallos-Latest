@@ -58,6 +58,9 @@ const upload = multer({
  * - POST /api/quiz/lobby/challenge/:id/counter - Counter-offer
  * - GET /api/quiz/lobby/match/:id - Get match details
  * - POST /api/quiz/lobby/match/:id/forfeit - Forfeit match
+ * - GET /api/quiz/lobby/players - List online players (+ inviteLinks when empty)
+ * - GET /api/quiz/lobby/players/available - List challengeable players (+ inviteLinks when empty)
+ * - GET /api/quiz/lobby/status - Single-call lobby status: counts + inviteLinks when no one available
  * 
  * Tournament Routes:
  * - GET /api/quiz/tournaments - List tournaments
@@ -416,8 +419,10 @@ router.get('/active-users', async (req, res, next) => {
 
 /**
  * @route   GET /api/quiz/lobby/players
- * @desc    Get paginated list of currently online players (for Players screen)
+ * @desc    Get paginated list of currently online players (for Players screen).
  *          Excludes the requesting user. Returns nickname, avatar, wins, losses.
+ *          When no players are online (total === 0), also returns `inviteLinks`
+ *          so the frontend can immediately show "Invite a friend" CTAs.
  * @access  Private
  * @query   page (default 1), limit (default 12)
  */
@@ -430,6 +435,21 @@ router.get('/lobby/players', authMiddleware, async (req, res, next) => {
     const websocketManager = require('../services/websocketManager');
     const result = await websocketManager.getOnlinePlayers(userId, page, limit);
 
+    // No players online — attach invite share links so the frontend can
+    // immediately show "Invite a friend via WhatsApp / Email / SMS" CTAs.
+    if (result.total === 0) {
+      const quizInviteService = require('../services/quizInviteService');
+      const inviterName = req.user?.firstName || req.user?.username || 'Friend';
+      const inviteLinks = quizInviteService.getShareLinks({ inviterName, inviterUserId: userId });
+      return res.json({
+        success: true,
+        ...result,
+        noPlayersOnline: true,
+        message: 'No players are online right now. Invite a friend to play!',
+        inviteLinks
+      });
+    }
+
     res.json({ success: true, ...result });
   } catch (error) {
     next(error);
@@ -441,6 +461,8 @@ router.get('/lobby/players', authMiddleware, async (req, res, next) => {
  * @desc    Get paginated list of players who are online AND not in an active/pending match.
  *          Only available players can receive a challenge invite.
  *          Excludes the requesting user.
+ *          When no available players exist, returns `inviteLinks` so the frontend
+ *          can show "Invite a friend" CTAs.
  * @access  Private
  * @query   page (default 1), limit (default 12)
  */
@@ -453,11 +475,128 @@ router.get('/lobby/players/available', authMiddleware, async (req, res, next) =>
     const websocketManager = require('../services/websocketManager');
     const result = await websocketManager.getAvailablePlayers(userId, page, limit);
 
+    // No available players — attach invite share links so the frontend can
+    // immediately show "Invite a friend via WhatsApp / Email / SMS" CTAs.
+    if (result.total === 0) {
+      const quizInviteService = require('../services/quizInviteService');
+      const inviterName = req.user?.firstName || req.user?.username || 'Friend';
+      const inviteLinks = quizInviteService.getShareLinks({ inviterName, inviterUserId: userId });
+
+      // Distinguish between "no one online" and "everyone online is already in a match"
+      const activeUserTracker = require('../services/activeUserTracker');
+      const totalOnline = await activeUserTracker.getActiveUserCount();
+      const allBusy = totalOnline > 1; // >1 because we excluded self
+
+      return res.json({
+        success: true,
+        ...result,
+        noPlayersAvailable: true,
+        message: allBusy
+          ? 'All online players are currently in a match. Invite a friend to play!'
+          : 'No players are online right now. Invite a friend to play!',
+        inviteLinks
+      });
+    }
+
     res.json({ success: true, ...result });
   } catch (error) {
     next(error);
   }
 });
+
+/**
+ * @route   GET /api/quiz/lobby/status
+ * @desc    Single-call lobby status check for the frontend home/lobby screen.
+ *          Returns online player count, available player count, and — when either
+ *          is zero — pre-built invite share links (WhatsApp deep-link, SMS URI,
+ *          and the raw invite URL for email / copy-link).
+ * @access  Private
+ */
+router.get('/lobby/status', authMiddleware, async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+
+    const activeUserTracker = require('../services/activeUserTracker');
+    const websocketManager = require('../services/websocketManager');
+
+    // Run both counts in parallel
+    const [totalOnlineCount, availableResult] = await Promise.all([
+      activeUserTracker.getActiveUserCount(),
+      websocketManager.getAvailablePlayers(userId, 1, 1) // just need the total count
+    ]);
+
+    // Online count excluding self
+    const onlineExcludingSelf = Math.max(0, totalOnlineCount - 1);
+    const availableCount = availableResult.total;
+
+    const status = {
+      success: true,
+      onlineCount: onlineExcludingSelf,
+      availableCount,
+      hasPlayersOnline: onlineExcludingSelf > 0,
+      hasAvailablePlayers: availableCount > 0,
+      timestamp: Date.now()
+    };
+
+    // Attach invite links whenever there are no available players to challenge
+    if (availableCount === 0) {
+      const quizInviteService = require('../services/quizInviteService');
+      const inviterName = req.user?.firstName || req.user?.username || 'Friend';
+      status.noPlayersAvailable = true;
+      status.message = onlineExcludingSelf > 0
+        ? 'All online players are currently in a match. Invite a friend to play!'
+        : 'No players are online right now. Check back soon or invite a friend!';
+      status.inviteLinks = quizInviteService.getShareLinks({ inviterName, inviterUserId: userId });
+    }
+
+    res.json(status);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==================== INVITE ROUTES ====================
+
+const quizInviteController = require('../controllers/quizInviteController');
+
+/**
+ * @route   POST /api/quiz/invite/email
+ * @desc    Invite a friend to join the quiz platform via email
+ * @access  Private
+ * @body    { toEmail, inviterName }
+ */
+router.post(
+  '/invite/email',
+  authMiddleware,
+  quizRateLimiter,
+  quizInviteController.sendEmailInvite
+);
+
+/**
+ * @route   POST /api/quiz/invite/sms
+ * @desc    Invite a friend to join the quiz platform via SMS (Twilio)
+ * @access  Private
+ * @body    { toPhone, inviterName }
+ */
+router.post(
+  '/invite/sms',
+  authMiddleware,
+  quizRateLimiter,
+  quizInviteController.sendSmsInvite
+);
+
+/**
+ * @route   GET /api/quiz/invite/share-links
+ * @desc    Get WhatsApp + SMS deep-link URLs to share an invite from the frontend
+ *          (no server-side send — client opens the returned URL)
+ * @access  Private
+ * @query   inviterName (optional)
+ */
+router.get(
+  '/invite/share-links',
+  authMiddleware,
+  quizInviteController.getShareLinks
+);
 
 // ==================== ERROR HANDLER ====================
 // Must be last - catches all errors from quiz routes

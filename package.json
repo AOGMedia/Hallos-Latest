@@ -47,6 +47,7 @@
     "sequelize": "^6.37.7",
     "socket.io": "^4.8.3",
     "stripe": "^20.0.0",
+    "twilio": "^5.3.5",
     "uuid": "^9.0.1",
     "xlsx": "^0.18.5",
     "zego-express-engine-webrtc": "^3.11.0"
