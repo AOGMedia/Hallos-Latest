@@ -568,7 +568,7 @@ const quizInviteController = require('../controllers/quizInviteController');
 router.post(
   '/invite/email',
   authMiddleware,
-  quizRateLimiter,
+  quizRateLimiter.apiEndpoint(),
   quizInviteController.sendEmailInvite
 );
 
@@ -581,7 +581,7 @@ router.post(
 router.post(
   '/invite/sms',
   authMiddleware,
-  quizRateLimiter,
+  quizRateLimiter.apiEndpoint(),
   quizInviteController.sendSmsInvite
 );
 
