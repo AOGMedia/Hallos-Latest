@@ -73,6 +73,7 @@ const allowedOrigins = [
   'https://aistudio.google.com',
   'https://www.hallos.net',
   'https://hallos.net',
+  'https://quiz.hallos.net',
   'https://www.quiz.hallos.net',
   'https://hallos-frontend.vercel.app',
   'https://hallos-latest.vercel.app'
