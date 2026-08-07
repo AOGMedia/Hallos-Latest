@@ -5,8 +5,9 @@
  * already has an account, is online right now, or has never heard of
  * hallos before.
  *
- * A QuizInvite is a persisted, tokenized, expiring link:
- *   {CLIENT_URL}/quiz/invite/{token}
+ * A QuizInvite is a persisted, tokenized, expiring link on the quiz app's own
+ * subdomain (not the main hallos.net site):
+ *   {QUIZ_CLIENT_URL}/invite/{token}   e.g. https://quiz.hallos.net/invite/{token}
  *
  * It can be claimed by any authenticated user (after signup, login, or
  * OAuth — the frontend just calls claimInvite() once it has a session,
@@ -46,8 +47,13 @@ class QuizInviteService {
   // Link building
   // ---------------------------------------------------------------------
 
-  _clientBase() {
-    return (process.env.CLIENT_URL || 'https://hallos.net').replace(/\/$/, '');
+  /**
+   * The quiz app lives on its own subdomain, separate from the main
+   * hallos.net site (see allowedOrigins in server.js) — invite links must
+   * point there, not at CLIENT_URL.
+   */
+  _quizAppBase() {
+    return (process.env.QUIZ_CLIENT_URL || 'https://quiz.hallos.net').replace(/\/$/, '');
   }
 
   /**
@@ -64,7 +70,7 @@ class QuizInviteService {
   }
 
   buildInviteUrl(token) {
-    return `${this._clientBase()}/quiz/invite/${token}`;
+    return `${this._quizAppBase()}/invite/${token}`;
   }
 
   buildWhatsAppShareUrl(inviterName, inviteUrl) {
@@ -466,7 +472,9 @@ class QuizInviteService {
     ]);
 
     const friendName = inviteeStats?.nickname || inviteeUser?.firstname || 'Your friend';
-    const ctaUrl = `${this._clientBase()}/quiz${matchAttempt.matched ? `?match=${matchAttempt.matchId}` : ''}`;
+    const ctaUrl = matchAttempt.matched
+      ? `${this._quizAppBase()}/match/${matchAttempt.matchId}`
+      : this._quizAppBase();
 
     let notified = false;
 
