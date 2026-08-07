@@ -5,9 +5,9 @@
  * already has an account, is online right now, or has never heard of
  * hallos before.
  *
- * A QuizInvite is a persisted, tokenized, expiring link on the quiz app's own
- * subdomain (not the main hallos.net site):
- *   {QUIZ_CLIENT_URL}/invite/{token}   e.g. https://quiz.hallos.net/invite/{token}
+ * A QuizInvite is a persisted, tokenized, expiring link under the quiz
+ * feature's route on the main site:
+ *   {CLIENT_URL}/dashboard/games/invite/{token}   e.g. https://hallos.net/dashboard/games/invite/{token}
  *
  * It can be claimed by any authenticated user (after signup, login, or
  * OAuth — the frontend just calls claimInvite() once it has a session,
@@ -48,12 +48,12 @@ class QuizInviteService {
   // ---------------------------------------------------------------------
 
   /**
-   * The quiz app lives on its own subdomain, separate from the main
-   * hallos.net site (see allowedOrigins in server.js) — invite links must
-   * point there, not at CLIENT_URL.
+   * The quiz feature lives at /dashboard/games on the main site, not on a
+   * separate subdomain.
    */
   _quizAppBase() {
-    return (process.env.QUIZ_CLIENT_URL || 'https://quiz.hallos.net').replace(/\/$/, '');
+    const base = (process.env.CLIENT_URL || 'https://hallos.net').replace(/\/$/, '');
+    return `${base}/dashboard/games`;
   }
 
   /**
