@@ -108,6 +108,12 @@ class WebSocketManager {
       console.error(`[WebSocket] Error marking user ${userId} active:`, err.message);
     });
 
+    // Flush any "your friend joined via your invite" notifications that
+    // couldn't be delivered live because this user was offline at claim time.
+    require('./quizInviteService').notifyPendingInviteClaims(userId).catch(err => {
+      console.error(`[WebSocket] Error flushing pending invite claims for user ${userId}:`, err.message);
+    });
+
     // Notify all clients that player list changed
     setTimeout(() => this.broadcastPlayersUpdated(), 200);
 
@@ -161,6 +167,11 @@ class WebSocketManager {
     // Mark user as active in Redis
     activeUserTracker.markUserActive(userId).catch(err => {
       console.error(`[WebSocket] Error marking user ${userId} active:`, err.message);
+    });
+
+    // Flush any invite-claim notifications missed while briefly disconnected
+    require('./quizInviteService').notifyPendingInviteClaims(userId).catch(err => {
+      console.error(`[WebSocket] Error flushing pending invite claims for user ${userId}:`, err.message);
     });
 
     // Send reconnection confirmation

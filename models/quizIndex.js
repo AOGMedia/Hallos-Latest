@@ -13,6 +13,8 @@ const QuizTournamentRound = require('./QuizTournamentRound');
 const QuizMatchAnswer = require('./QuizMatchAnswer');
 const ChutaCoinTransaction = require('./ChutaCoinTransaction');
 const UserQuizStats = require('./UserQuizStats');
+const QuizInvite = require('./QuizInvite');
+const QuizInviteClaim = require('./QuizInviteClaim');
 const User = require('./User');
 
 // QuizCategory associations
@@ -129,6 +131,38 @@ UserQuizStats.belongsTo(User, {
   as: 'user'
 });
 
+// QuizInvite associations
+QuizInvite.belongsTo(User, {
+  foreignKey: 'inviterUserId',
+  as: 'inviter'
+});
+
+QuizInvite.belongsTo(QuizCategory, {
+  foreignKey: 'categoryId',
+  as: 'category'
+});
+
+QuizInvite.hasMany(QuizInviteClaim, {
+  foreignKey: 'inviteId',
+  as: 'claims'
+});
+
+// QuizInviteClaim associations
+QuizInviteClaim.belongsTo(QuizInvite, {
+  foreignKey: 'inviteId',
+  as: 'invite'
+});
+
+QuizInviteClaim.belongsTo(User, {
+  foreignKey: 'inviteeUserId',
+  as: 'invitee'
+});
+
+QuizInviteClaim.belongsTo(QuizMatch, {
+  foreignKey: 'matchId',
+  as: 'match'
+});
+
 // User associations (reverse relationships)
 User.hasMany(QuizQuestion, {
   foreignKey: 'createdBy',
@@ -174,5 +208,7 @@ module.exports = {
   QuizTournamentRound,
   QuizMatchAnswer,
   ChutaCoinTransaction,
-  UserQuizStats
+  UserQuizStats,
+  QuizInvite,
+  QuizInviteClaim
 };

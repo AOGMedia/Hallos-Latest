@@ -61,7 +61,14 @@ const upload = multer({
  * - GET /api/quiz/lobby/players - List online players (+ inviteLinks when empty)
  * - GET /api/quiz/lobby/players/available - List challengeable players (+ inviteLinks when empty)
  * - GET /api/quiz/lobby/status - Single-call lobby status: counts + inviteLinks when no one available
- * 
+ *
+ * Invite Routes (invite a friend, online or not, with or without an account):
+ * - POST /api/quiz/invite/create - Create a trackable, tokenized invite link
+ * - GET /api/quiz/invite/resolve/:token - Public: resolve a link before login
+ * - POST /api/quiz/invite/claim - Resume an invite once the invitee is authenticated
+ * - GET /api/quiz/invite/mine - List invites sent + their status
+ * - POST /api/quiz/invite/:id/revoke - Cancel an outstanding invite
+ *
  * Tournament Routes:
  * - GET /api/quiz/tournaments - List tournaments
  * - GET /api/quiz/tournament/:id - Get tournament details
@@ -560,10 +567,78 @@ router.get('/lobby/status', authMiddleware, async (req, res, next) => {
 const quizInviteController = require('../controllers/quizInviteController');
 
 /**
+ * @route   POST /api/quiz/invite/create
+ * @desc    Create a trackable, tokenized "invite a friend to play" link.
+ *          Works whether the friend has an account or not, and whether
+ *          they're online or not — the frontend calls POST /invite/claim
+ *          once the invitee has an authenticated session (after signup,
+ *          login, or OAuth) to resume the invite.
+ * @access  Private
+ * @body    { channel: 'email'|'sms'|'whatsapp'|'link', toEmail?, toPhone?, wagerAmount?, categoryId?, expiresInDays? }
+ */
+router.post(
+  '/invite/create',
+  authMiddleware,
+  quizRateLimiter.apiEndpoint(),
+  quizInviteController.createInvite
+);
+
+/**
+ * @route   GET /api/quiz/invite/resolve/:token
+ * @desc    Resolve an invite token before the invitee has logged in, so the
+ *          frontend can render "X invited you to play — Sign up or Log in".
+ * @access  Public
+ */
+router.get(
+  '/invite/resolve/:token',
+  quizRateLimiter.apiEndpoint(),
+  quizInviteController.resolveInvite
+);
+
+/**
+ * @route   POST /api/quiz/invite/claim
+ * @desc    Claim an invite once the invitee has an authenticated session.
+ *          Auto-matches into a live game with the inviter when possible
+ *          (inviter online + invitee has a quiz profile + invite has a
+ *          category), otherwise notifies the inviter so they can challenge
+ *          their friend as soon as both are ready.
+ * @access  Private
+ * @body    { token }
+ */
+router.post(
+  '/invite/claim',
+  authMiddleware,
+  quizRateLimiter.apiEndpoint(),
+  quizInviteController.claimInvite
+);
+
+/**
+ * @route   GET /api/quiz/invite/mine
+ * @desc    List invites the current user has sent, with click/claim counts
+ * @access  Private
+ */
+router.get(
+  '/invite/mine',
+  authMiddleware,
+  quizInviteController.listMyInvites
+);
+
+/**
+ * @route   POST /api/quiz/invite/:id/revoke
+ * @desc    Revoke an outstanding invite the current user created
+ * @access  Private
+ */
+router.post(
+  '/invite/:id/revoke',
+  authMiddleware,
+  quizInviteController.revokeInvite
+);
+
+/**
  * @route   POST /api/quiz/invite/email
  * @desc    Invite a friend to join the quiz platform via email
  * @access  Private
- * @body    { toEmail, inviterName }
+ * @body    { toEmail }
  */
 router.post(
   '/invite/email',
@@ -576,7 +651,7 @@ router.post(
  * @route   POST /api/quiz/invite/sms
  * @desc    Invite a friend to join the quiz platform via SMS (Twilio)
  * @access  Private
- * @body    { toPhone, inviterName }
+ * @body    { toPhone }
  */
 router.post(
   '/invite/sms',
@@ -590,7 +665,6 @@ router.post(
  * @desc    Get WhatsApp + SMS deep-link URLs to share an invite from the frontend
  *          (no server-side send — client opens the returned URL)
  * @access  Private
- * @query   inviterName (optional)
  */
 router.get(
   '/invite/share-links',

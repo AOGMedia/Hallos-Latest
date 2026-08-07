@@ -34,6 +34,19 @@ exports.signup = async (req, res) => {
       });
     }
 
+    // Fire-and-forget quiz invite claim (never blocks signup). This is a
+    // belt-and-suspenders convenience — the frontend should also call
+    // POST /api/quiz/invite/claim explicitly once it has a session, since
+    // that path also covers login and OAuth, which this hook doesn't.
+    const quizInviteToken = req.body.quizInviteToken || req.query.quizInviteToken;
+    if (quizInviteToken) {
+      const quizInviteService = require('../services/quizInviteService');
+      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+      quizInviteService.claimInvite({ token: quizInviteToken, inviteeUserId: newUser.id, ip }).catch(err => {
+        console.error('[Auth] Quiz invite claim failed (non-critical):', err.message);
+      });
+    }
+
     const token = jwt.sign({ id: newUser.id, role: newUser.role }, SECRET_KEY, { expiresIn: '1d' });
 
     res.status(201).json({ message: 'User created successfully', token });
@@ -62,8 +75,19 @@ exports.login = async (req, res) => {
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    // Fire-and-forget quiz invite claim (never blocks login) — covers the
+    // "friend already had an account, just wasn't online" case.
+    const quizInviteToken = req.body.quizInviteToken || req.query.quizInviteToken;
+    if (quizInviteToken) {
+      const quizInviteService = require('../services/quizInviteService');
+      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+      quizInviteService.claimInvite({ token: quizInviteToken, inviteeUserId: user.id, ip }).catch(err => {
+        console.error('[Auth] Quiz invite claim failed (non-critical):', err.message);
+      });
+    }
+
     const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1d' });
-    
+
     // Return user object with role for frontend redirect logic
     res.json({ 
       message: 'Logged in successfully', 

@@ -1606,3 +1606,57 @@ exports.sendQuizInviteEmail = async (to, inviterName, inviteUrl) => {
   });
 };
 
+/**
+ * Notify an inviter that a friend they invited has joined the quiz platform.
+ *
+ * @param {string} to - Inviter's email
+ * @param {string} inviterFirstName - Inviter's first name (for greeting)
+ * @param {string} friendName - Invitee's display name
+ * @param {string} ctaUrl - URL to open the quiz lobby (challenge the friend)
+ * @param {boolean} matched - Whether a match was already auto-created for them
+ */
+exports.sendQuizFriendJoinedEmail = async (to, inviterFirstName, friendName, ctaUrl, matched) => {
+  const heading = matched ? "🎮 You're being matched right now!" : '🎉 Your friend just joined!';
+  const body = matched
+    ? `<strong>${friendName}</strong> just joined hallos through your invite, and we've matched you up for a quiz right now — jump in before your session expires!`
+    : `<strong>${friendName}</strong> just joined hallos through your invite. Head back to the quiz lobby to challenge them directly!`;
+  const ctaLabel = matched ? 'Join the Match' : 'Challenge Them Now';
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 0 auto;">
+      <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 8px 8px 0 0;">
+        <h1 style="color: white; margin: 0; font-size: 26px;">${heading}</h1>
+      </div>
+
+      <div style="padding: 30px; background-color: #ffffff;">
+        <p style="font-size: 18px; color: #333;">Hi ${inviterFirstName || 'there'},</p>
+
+        <p style="font-size: 16px; line-height: 1.8; color: #555;">
+          ${body}
+        </p>
+
+        <div style="text-align: center; margin: 35px 0;">
+          <a href="${ctaUrl}" style="background-color: #667eea; color: white; padding: 15px 40px; text-decoration: none; border-radius: 25px; font-weight: bold; display: inline-block; font-size: 16px;">
+            ${ctaLabel}
+          </a>
+        </div>
+
+        <p style="font-size: 16px; margin-top: 30px;">
+          <strong>The hallos Team</strong>
+        </p>
+      </div>
+
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Quiz" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: matched
+      ? `${friendName} joined and you've been matched! 🎮`
+      : `${friendName} just joined hallos via your invite! 🎉`,
+    html,
+  });
+};
+
