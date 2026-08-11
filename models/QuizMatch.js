@@ -28,6 +28,12 @@ const QuizMatch = sequelize.define('QuizMatch', {
       key: 'id'
     }
   },
+  roundNumber: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    field: 'round_number',
+    comment: 'Tournament round this match belongs to (knockout format only)'
+  },
   participants: {
     type: DataTypes.JSONB,
     allowNull: false,

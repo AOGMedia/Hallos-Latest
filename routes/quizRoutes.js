@@ -70,17 +70,20 @@ const upload = multer({
  * - POST /api/quiz/invite/:id/revoke - Cancel an outstanding invite
  *
  * Tournament Routes:
- * - GET /api/quiz/tournaments - List tournaments
+ * - GET /api/quiz/tournaments - List tournaments (open/in_progress/completed/cancelled only)
+ * - POST /api/quiz/tournament/propose - Propose a user-hosted tournament (pending_review until approved)
+ * - GET /api/quiz/tournament/mine - Tournaments you're registered for or proposed
  * - GET /api/quiz/tournament/:id - Get tournament details
  * - POST /api/quiz/tournament/:id/register - Register for tournament
  * - POST /api/quiz/tournament/:id/unregister - Unregister from tournament
  * - GET /api/quiz/tournament/:id/leaderboard - Get tournament leaderboard
- * 
+ * - GET /api/quiz/tournament/:id/round/:roundNumber - Round questions/status/standings
+ *
  * Leaderboard Routes:
  * - GET /api/quiz/leaderboard/global - Get global leaderboard
  * - GET /api/quiz/leaderboard/lobby - Get lobby leaderboard
  * - GET /api/quiz/leaderboard/tournament - Get tournament leaderboard
- * 
+ *
  * Admin Routes:
  * - POST /api/quiz/admin/questions/upload - Upload questions
  * - GET /api/quiz/admin/questions - List questions
@@ -91,6 +94,11 @@ const upload = multer({
  * - PUT /api/quiz/admin/tournament/:id - Update tournament
  * - POST /api/quiz/admin/tournament/:id/cancel - Cancel tournament
  * - POST /api/quiz/admin/tournament/:id/start - Start tournament
+ * - GET /api/quiz/admin/tournament/proposals - List pending user-hosted proposals
+ * - POST /api/quiz/admin/tournament/:id/approve - Approve a proposal
+ * - POST /api/quiz/admin/tournament/:id/reject - Reject a proposal
+ * - GET /api/quiz/admin/tournament/:id/overview - Live round/match monitoring
+ * - POST /api/quiz/admin/tournament/:id/force-finalize - Manual override to end a stuck tournament
  * - GET /api/quiz/admin/dashboard - Get dashboard stats
  * - POST /api/quiz/admin/user/:id/adjust-balance - Adjust user balance
  */
@@ -254,6 +262,22 @@ router.post('/lobby/match/:id/answer', authMiddleware, quizRateLimiter.answerSub
 router.get('/tournaments', authMiddleware, quizTournamentController.getTournaments);
 
 /**
+ * @route   POST /api/quiz/tournament/propose
+ * @desc    Propose a user-hosted tournament (enters pending_review until an admin approves it)
+ * @access  Private
+ * @note    Registered before /tournament/:id so "propose" isn't swallowed as an :id value
+ */
+router.post('/tournament/propose', authMiddleware, quizRateLimiter.tournamentRegistration(), quizTournamentController.proposeTournament);
+
+/**
+ * @route   GET /api/quiz/tournament/mine
+ * @desc    Get tournaments the current user is registered for or has proposed
+ * @access  Private
+ * @note    Registered before /tournament/:id for the same reason as above
+ */
+router.get('/tournament/mine', authMiddleware, quizTournamentController.getMyTournaments);
+
+/**
  * @route   GET /api/quiz/tournament/:id
  * @desc    Get tournament details
  * @access  Private
@@ -275,11 +299,25 @@ router.post('/tournament/:id/register', authMiddleware, quizRateLimiter.tourname
 router.post('/tournament/:id/unregister', authMiddleware, quizTournamentController.unregisterFromTournament);
 
 /**
+ * @route   POST /api/quiz/tournament/:id/forfeit
+ * @desc    Voluntarily forfeit an in-progress tournament
+ * @access  Private
+ */
+router.post('/tournament/:id/forfeit', authMiddleware, quizTournamentController.forfeitTournament);
+
+/**
  * @route   GET /api/quiz/tournament/:id/leaderboard
  * @desc    Get tournament leaderboard
  * @access  Private
  */
 router.get('/tournament/:id/leaderboard', authMiddleware, quizTournamentController.getTournamentLeaderboard);
+
+/**
+ * @route   GET /api/quiz/tournament/:id/round/:roundNumber
+ * @desc    Get round detail (questions, status, standings) for a participant
+ * @access  Private
+ */
+router.get('/tournament/:id/round/:roundNumber', authMiddleware, quizTournamentController.getRoundDetail);
 
 // ==================== LEADERBOARD ROUTES ====================
 
@@ -387,6 +425,41 @@ router.post('/admin/tournament/:id/cancel', authMiddleware, adminMiddleware, qui
  * @access  Admin only
  */
 router.post('/admin/tournament/:id/start', authMiddleware, adminMiddleware, quizAdminController.startTournament);
+
+/**
+ * @route   GET /api/quiz/admin/tournament/proposals
+ * @desc    List pending user-hosted tournament proposals
+ * @access  Admin only
+ */
+router.get('/admin/tournament/proposals', authMiddleware, adminMiddleware, quizAdminController.listTournamentProposals);
+
+/**
+ * @route   POST /api/quiz/admin/tournament/:id/approve
+ * @desc    Approve a user-hosted tournament proposal
+ * @access  Admin only
+ */
+router.post('/admin/tournament/:id/approve', authMiddleware, adminMiddleware, quizAdminController.approveTournamentProposal);
+
+/**
+ * @route   POST /api/quiz/admin/tournament/:id/reject
+ * @desc    Reject a user-hosted tournament proposal
+ * @access  Admin only
+ */
+router.post('/admin/tournament/:id/reject', authMiddleware, adminMiddleware, quizAdminController.rejectTournamentProposal);
+
+/**
+ * @route   GET /api/quiz/admin/tournament/:id/overview
+ * @desc    Live monitoring view — rounds, matches, participant status breakdown
+ * @access  Admin only
+ */
+router.get('/admin/tournament/:id/overview', authMiddleware, adminMiddleware, quizAdminController.getTournamentOverview);
+
+/**
+ * @route   POST /api/quiz/admin/tournament/:id/force-finalize
+ * @desc    Manual override to finalize a stuck tournament and pay out prizes based on current standings
+ * @access  Admin only
+ */
+router.post('/admin/tournament/:id/force-finalize', authMiddleware, adminMiddleware, quizAdminController.forceFinalizeTournament);
 
 /**
  * @route   GET /api/quiz/admin/dashboard

@@ -83,6 +83,11 @@ const QuizTournamentParticipant = sequelize.define('QuizTournamentParticipant', 
     type: DataTypes.DATE,
     allowNull: true,
     field: 'eliminated_at'
+  },
+  registrationIp: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: 'registration_ip'
   }
 }, {
   tableName: 'quiz_tournament_participants',

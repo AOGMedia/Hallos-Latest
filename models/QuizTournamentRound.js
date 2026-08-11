@@ -46,6 +46,13 @@ const QuizTournamentRound = sequelize.define('QuizTournamentRound', {
     field: 'eliminated_users',
     comment: 'Array of user IDs eliminated in this round'
   },
+  questionStartTimes: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: {},
+    field: 'question_start_times',
+    comment: 'Map of questionId to server timestamp — mirrors QuizMatch, used by shared-question-set formats'
+  },
   status: {
     type: DataTypes.ENUM('pending', 'active', 'completed'),
     allowNull: false,

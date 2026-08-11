@@ -394,15 +394,29 @@ class WebSocketManager {
           return;
         }
 
-        // TODO: Implement tournament answer submission
-        // This would be similar to match answer submission but for tournaments
+        // Knockout format has no shared-question round to answer against —
+        // those answers go through the normal 'submit_answer' match event
+        // instead, since each knockout pairing is a real QuizMatch.
+        const tournamentService = require('./tournamentService');
+        const result = await tournamentService.submitAnswer(
+          tournamentId,
+          roundNumber,
+          userId,
+          questionId,
+          answerId,
+          clientTimestamp || Date.now()
+        );
 
         socket.emit('tournament_answer_recorded', {
           questionId,
-          success: true
+          success: true,
+          correct: result.correct,
+          correctAnswer: result.correctAnswer,
+          pointsEarned: result.pointsEarned,
+          responseTime: result.responseTime
         });
 
-        console.log(`[WebSocket] User ${userId} answered tournament question`);
+        console.log(`[WebSocket] User ${userId} answered tournament question ${questionId} (correct: ${result.correct})`);
       } catch (error) {
         console.error('[WebSocket] Submit tournament answer error:', error);
         socket.emit('error', {
@@ -770,19 +784,18 @@ class WebSocketManager {
       }
     }
 
-    // Handle tournament forfeit if applicable
+    // Handle tournament forfeit if applicable. When both matchId and
+    // tournamentId are set (a knockout participant), forfeitMatch above has
+    // already ended their match and advanced the bracket via
+    // onTournamentMatchEnded — this call still runs to mark the
+    // QuizTournamentParticipant row eliminated, but is a safe no-op on the
+    // match itself (it's no longer 'active' by the time this runs).
+    // tournamentService.forfeitTournament emits 'participant_forfeited'
+    // itself, so we don't duplicate that here.
     if (tournamentId) {
       try {
-        // TODO: Implement tournament forfeit logic
-        // const tournamentService = require('./tournamentService');
-        // await tournamentService.forfeitTournament(tournamentId, userId);
-
-        // Notify other participants
-        this.io.to(`tournament:${tournamentId}`).emit('participant_forfeited', {
-          userId,
-          reason: 'Failed to reconnect',
-          timestamp: Date.now()
-        });
+        const tournamentService = require('./tournamentService');
+        await tournamentService.forfeitTournament(tournamentId, userId);
 
         console.log(`[WebSocket] User ${userId} forfeited tournament ${tournamentId} due to disconnect`);
       } catch (error) {

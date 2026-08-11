@@ -349,8 +349,32 @@ function setupQuizScheduledTasks() {
     }
   });
   
+  // 🕐 Every minute: Tournament lifecycle sweep (auto-close registration,
+  // auto-start due tournaments, auto-refund under-filled ones)
+  cron.schedule('* * * * *', async () => {
+    try {
+      const tournamentService = require('./services/tournamentService');
+      await tournamentService.runLifecycleSweep();
+    } catch (error) {
+      console.error('❌ [Cron] Tournament lifecycle sweep failed:', error.message);
+    }
+  });
+
+  // 🕐 Every minute: Force-complete tournament rounds where a participant
+  // went AFK without disconnecting (no socket-close to trigger forfeit)
+  cron.schedule('* * * * *', async () => {
+    try {
+      const tournamentService = require('./services/tournamentService');
+      await tournamentService.sweepStaleRounds();
+    } catch (error) {
+      console.error('❌ [Cron] Tournament stale-round sweep failed:', error.message);
+    }
+  });
+
   console.log('⏰ Quiz platform scheduled tasks configured:');
   console.log('   - Every 5 minutes: Refresh leaderboard cache');
-  console.log('   - Hourly: Expire old challenges (24h+)');
+  console.log('   - Every minute: Expire old challenges (60s timeout)');
+  console.log('   - Every minute: Tournament lifecycle sweep (registration/start/refund)');
+  console.log('   - Every minute: Tournament stale-round sweep (AFK timeout)');
 }
   

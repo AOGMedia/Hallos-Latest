@@ -15,6 +15,7 @@ const ChutaCoinTransaction = require('./ChutaCoinTransaction');
 const UserQuizStats = require('./UserQuizStats');
 const QuizInvite = require('./QuizInvite');
 const QuizInviteClaim = require('./QuizInviteClaim');
+const QuizTournamentAnswer = require('./QuizTournamentAnswer');
 const User = require('./User');
 
 // QuizCategory associations
@@ -71,6 +72,11 @@ QuizTournament.belongsTo(User, {
   as: 'proposer'
 });
 
+QuizTournament.belongsTo(User, {
+  foreignKey: 'reviewedBy',
+  as: 'reviewer'
+});
+
 QuizTournament.hasMany(QuizTournamentParticipant, {
   foreignKey: 'tournamentId',
   as: 'participants'
@@ -101,6 +107,32 @@ QuizTournamentParticipant.belongsTo(User, {
 QuizTournamentRound.belongsTo(QuizTournament, {
   foreignKey: 'tournamentId',
   as: 'tournament'
+});
+
+QuizTournamentRound.hasMany(QuizTournamentAnswer, {
+  foreignKey: 'roundId',
+  as: 'answers'
+});
+
+// QuizTournamentAnswer associations
+QuizTournamentAnswer.belongsTo(QuizTournamentRound, {
+  foreignKey: 'roundId',
+  as: 'round'
+});
+
+QuizTournamentAnswer.belongsTo(QuizTournament, {
+  foreignKey: 'tournamentId',
+  as: 'tournament'
+});
+
+QuizTournamentAnswer.belongsTo(User, {
+  foreignKey: 'userId',
+  as: 'user'
+});
+
+QuizTournamentAnswer.belongsTo(QuizQuestion, {
+  foreignKey: 'questionId',
+  as: 'question'
 });
 
 // QuizMatchAnswer associations
@@ -206,6 +238,7 @@ module.exports = {
   QuizTournament,
   QuizTournamentParticipant,
   QuizTournamentRound,
+  QuizTournamentAnswer,
   QuizMatchAnswer,
   ChutaCoinTransaction,
   UserQuizStats,
