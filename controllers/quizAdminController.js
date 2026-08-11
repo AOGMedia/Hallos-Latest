@@ -275,6 +275,151 @@ exports.startTournament = async (req, res) => {
 };
 
 /**
+ * List pending user-hosted tournament proposals
+ * GET /api/quiz/admin/tournament/proposals
+ */
+exports.listTournamentProposals = async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+
+    const result = await tournamentService.listProposals({
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error('[Quiz Admin Controller] List proposals error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to list tournament proposals'
+    });
+  }
+};
+
+/**
+ * Approve a user-hosted tournament proposal — opens it for registration
+ * POST /api/quiz/admin/tournament/:id/approve
+ */
+exports.approveTournamentProposal = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const { id: tournamentId } = req.params;
+
+    const result = await tournamentService.approveTournamentProposal(tournamentId, adminId);
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[Quiz Admin Controller] Approve proposal error:', error);
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to approve proposal'
+    });
+  }
+};
+
+/**
+ * Reject a user-hosted tournament proposal
+ * POST /api/quiz/admin/tournament/:id/reject
+ */
+exports.rejectTournamentProposal = async (req, res) => {
+  try {
+    const adminId = req.user.id;
+    const { id: tournamentId } = req.params;
+    const { reason } = req.body;
+
+    const result = await tournamentService.rejectTournamentProposal(tournamentId, adminId, reason);
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[Quiz Admin Controller] Reject proposal error:', error);
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to reject proposal'
+    });
+  }
+};
+
+/**
+ * Live monitoring view for a tournament in progress — rounds, per-round
+ * match/participant status, useful for spotting a stuck round before a
+ * player has to complain about it.
+ * GET /api/quiz/admin/tournament/:id/overview
+ */
+exports.getTournamentOverview = async (req, res) => {
+  try {
+    const { id: tournamentId } = req.params;
+
+    const QuizTournament = require('../models/QuizTournament');
+    const QuizTournamentRound = require('../models/QuizTournamentRound');
+    const QuizTournamentParticipant = require('../models/QuizTournamentParticipant');
+    const QuizMatch = require('../models/QuizMatch');
+
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    if (!tournament) {
+      return res.status(404).json({ success: false, message: 'Tournament not found' });
+    }
+
+    const [rounds, participants, matches] = await Promise.all([
+      QuizTournamentRound.findAll({ where: { tournamentId }, order: [['roundNumber', 'ASC']] }),
+      QuizTournamentParticipant.findAll({ where: { tournamentId } }),
+      QuizMatch.findAll({ where: { tournamentId }, order: [['roundNumber', 'ASC']] })
+    ]);
+
+    const statusCounts = participants.reduce((acc, p) => {
+      acc[p.status] = (acc[p.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    return res.status(200).json({
+      success: true,
+      tournament,
+      participantCount: participants.length,
+      statusCounts,
+      rounds,
+      matches: matches.map(m => ({
+        id: m.id,
+        roundNumber: m.roundNumber,
+        status: m.status,
+        challengerId: m.challengerId,
+        opponentId: m.opponentId,
+        winnerId: m.winnerId,
+        startedAt: m.startedAt,
+        completedAt: m.completedAt
+      }))
+    });
+  } catch (error) {
+    console.error('[Quiz Admin Controller] Get tournament overview error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get tournament overview'
+    });
+  }
+};
+
+/**
+ * Force-finalize a tournament — manual override for when a round is
+ * genuinely stuck (e.g. a bug leaves it unable to auto-advance). Pays out
+ * prizes based on whatever standings exist right now.
+ * POST /api/quiz/admin/tournament/:id/force-finalize
+ */
+exports.forceFinalizeTournament = async (req, res) => {
+  try {
+    const { id: tournamentId } = req.params;
+
+    const result = await tournamentService.distributePrizes(tournamentId);
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[Quiz Admin Controller] Force finalize tournament error:', error);
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to force-finalize tournament'
+    });
+  }
+};
+
+/**
  * Get admin dashboard statistics
  * GET /api/quiz/admin/dashboard
  */

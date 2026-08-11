@@ -647,9 +647,12 @@ class LobbyService {
    * @returns {Promise<{success: boolean, winnerId: number, scores: Object, earnings: Object}>}
    */
   async endMatch(matchId) {
-    return await QuizMatch.sequelize.transaction(async (t) => {
+    let endedMatch = null;
+
+    const result = await QuizMatch.sequelize.transaction(async (t) => {
       // Use LOCK.UPDATE to serialize concurrent incoming requests to end the match
       const match = await QuizMatch.findByPk(matchId, { lock: t.LOCK.UPDATE, transaction: t });
+      endedMatch = match;
 
       if (!match) {
         throw new Error('Match not found');
@@ -699,11 +702,15 @@ class LobbyService {
         winnerId = p1Time <= p2Time ? p1.userId : p2.userId;
       }
 
-      // Release escrowed funds to winner safely
-      try {
-        await quizWalletService.releaseEscrow(matchId, winnerId, match.escrowAmount);
-      } catch (escrowError) {
-        console.error('[LobbyService] Failed to release escrow in endMatch:', escrowError.message);
+      // Tournament matches don't wager per-match (entry fee was collected at
+      // registration; prizes are paid out once at tournament completion), so
+      // there's no escrow to release here.
+      if (match.matchType !== 'tournament') {
+        try {
+          await quizWalletService.releaseEscrow(matchId, winnerId, match.escrowAmount);
+        } catch (escrowError) {
+          console.error('[LobbyService] Failed to release escrow in endMatch:', escrowError.message);
+        }
       }
 
       // Update match
@@ -774,6 +781,20 @@ class LobbyService {
         earnings
       };
     });
+
+    // If this was a tournament knockout match, let the tournament engine know
+    // so it can advance the bracket once every match in the round is done.
+    // Deferred until after the transaction commits, same pattern as the
+    // socket emissions above and submitAnswer's post-commit side effects.
+    if (endedMatch && endedMatch.matchType === 'tournament' && !result.alreadyCompleted) {
+      setTimeout(() => {
+        require('./tournamentService').onTournamentMatchEnded(endedMatch).catch(err => {
+          console.error('[LobbyService] onTournamentMatchEnded failed:', err.message);
+        });
+      }, 0);
+    }
+
+    return result;
   }
 
   /**
@@ -806,8 +827,10 @@ class LobbyService {
     // Determine winner (the other participant)
     const winnerId = match.participants.find(p => p.userId !== userId).userId;
 
-    // Release all escrowed funds to winner
-    await quizWalletService.releaseEscrow(matchId, winnerId, match.escrowAmount);
+    // Tournament matches don't wager per-match — nothing to release.
+    if (match.matchType !== 'tournament') {
+      await quizWalletService.releaseEscrow(matchId, winnerId, match.escrowAmount);
+    }
 
     // Update match
     match.changed('participants', true); // Force Sequelize to detect JSONB mutation
@@ -838,6 +861,14 @@ class LobbyService {
       }
     } catch (wsError) {
       console.error('[LobbyService] Failed to emit match_ended on forfeit:', wsError.message);
+    }
+
+    if (match.matchType === 'tournament') {
+      setTimeout(() => {
+        require('./tournamentService').onTournamentMatchEnded(match).catch(err => {
+          console.error('[LobbyService] onTournamentMatchEnded (forfeit) failed:', err.message);
+        });
+      }, 0);
     }
 
     return {
@@ -1091,36 +1122,41 @@ class LobbyService {
         where: { matchId: match.id, userId: participant.userId, isCorrect: true }
       });
 
-      // Update lobby stats
-      const lobbyStats = { ...(stats.lobbyStats || {}) };
-      lobbyStats.totalMatches = (lobbyStats.totalMatches || 0) + 1;
+      // Lobby win/loss/wager stats only apply to real 1v1 wagered matches —
+      // tournament knockout matches have no per-match wager (entry fee was
+      // collected once at registration), so counting them here would
+      // pollute lobbyStats.winRate/totalWagered with $0 games.
+      const updates = { lastMatchAt: new Date() };
 
-      if (isWinner) {
-        lobbyStats.wins = (lobbyStats.wins || 0) + 1;
-        lobbyStats.totalWinnings = (lobbyStats.totalWinnings || 0) + parseFloat(match.escrowAmount || 0);
-      } else if (isForfeited) {
-        lobbyStats.forfeits = (lobbyStats.forfeits || 0) + 1;
-        lobbyStats.totalLosses = (lobbyStats.totalLosses || 0) + parseFloat(participant.wagerAmount || 0);
-      } else {
-        lobbyStats.losses = (lobbyStats.losses || 0) + 1;
-        lobbyStats.totalLosses = (lobbyStats.totalLosses || 0) + parseFloat(participant.wagerAmount || 0);
+      if (match.matchType !== 'tournament') {
+        const lobbyStats = { ...(stats.lobbyStats || {}) };
+        lobbyStats.totalMatches = (lobbyStats.totalMatches || 0) + 1;
+
+        if (isWinner) {
+          lobbyStats.wins = (lobbyStats.wins || 0) + 1;
+          lobbyStats.totalWinnings = (lobbyStats.totalWinnings || 0) + parseFloat(match.escrowAmount || 0);
+        } else if (isForfeited) {
+          lobbyStats.forfeits = (lobbyStats.forfeits || 0) + 1;
+          lobbyStats.totalLosses = (lobbyStats.totalLosses || 0) + parseFloat(participant.wagerAmount || 0);
+        } else {
+          lobbyStats.losses = (lobbyStats.losses || 0) + 1;
+          lobbyStats.totalLosses = (lobbyStats.totalLosses || 0) + parseFloat(participant.wagerAmount || 0);
+        }
+
+        lobbyStats.totalWagered = (lobbyStats.totalWagered || 0) + parseFloat(participant.wagerAmount || 0);
+        lobbyStats.netProfit = (lobbyStats.totalWinnings || 0) - (lobbyStats.totalLosses || 0);
+        lobbyStats.winRate = parseFloat(((lobbyStats.wins || 0) / lobbyStats.totalMatches * 100).toFixed(2));
+        updates.lobbyStats = lobbyStats;
       }
 
-      lobbyStats.totalWagered = (lobbyStats.totalWagered || 0) + parseFloat(participant.wagerAmount || 0);
-      lobbyStats.netProfit = (lobbyStats.totalWinnings || 0) - (lobbyStats.totalLosses || 0);
-      lobbyStats.winRate = parseFloat(((lobbyStats.wins || 0) / lobbyStats.totalMatches * 100).toFixed(2));
-
-      // Update overall stats using DB-sourced correct count
+      // Overall lifetime accuracy stats apply regardless of match type.
       const overallStats = { ...(stats.overallStats || {}) };
       overallStats.totalQuestions = (overallStats.totalQuestions || 0) + totalQuestionsInMatch;
       overallStats.correctAnswers = (overallStats.correctAnswers || 0) + correctCount;
       overallStats.accuracy = parseFloat(((overallStats.correctAnswers / overallStats.totalQuestions) * 100).toFixed(2));
+      updates.overallStats = overallStats;
 
-      await stats.update({
-        lobbyStats,
-        overallStats,
-        lastMatchAt: new Date()
-      });
+      await stats.update(updates);
     }
   }
 }

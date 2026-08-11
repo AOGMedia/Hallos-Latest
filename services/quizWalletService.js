@@ -397,32 +397,65 @@ class QuizWalletService {
   }
 
   /**
+   * Serialize concurrent balance-affecting operations for one user.
+   *
+   * Balance is derived from the latest ChutaCoinTransaction row rather than a
+   * maintained counter, so two concurrent debits can both read the same
+   * "current" balance and both succeed even if combined they overdraw the
+   * user. A Postgres transaction-scoped advisory lock keyed by userId closes
+   * that window without requiring a schema change — it's automatically
+   * released on commit/rollback. Caller MUST be inside a `transaction`.
+   *
+   * @param {number} userId
+   * @param {import('sequelize').Transaction} transaction
+   */
+  async lockUserWallet(userId, transaction) {
+    if (!transaction) {
+      throw new Error('lockUserWallet requires an active transaction');
+    }
+    await sequelize.query('SELECT pg_advisory_xact_lock(:userId);', {
+      replacements: { userId: Number(userId) },
+      transaction
+    });
+  }
+
+  /**
    * Deduct tournament entry fee
    * @param {number} userId - User ID
    * @param {number} entryFee - Entry fee in Chuta
    * @param {string} tournamentId - Tournament UUID
+   * @param {import('sequelize').Transaction} [transaction] - Pass the caller's
+   *   transaction so this debit is atomic with whatever else the caller does
+   *   (e.g. creating the participant row). Also acquires the per-user
+   *   advisory lock when a transaction is supplied, so concurrent
+   *   registrations for the same user can't both pass the balance check.
    * @returns {Promise<{success: boolean, newBalance: number}>}
    */
-  async deductTournamentEntry(userId, entryFee, tournamentId) {
+  async deductTournamentEntry(userId, entryFee, tournamentId, transaction = null) {
+    if (transaction) {
+      await this.lockUserWallet(userId, transaction);
+    }
+
     const currentBalance = await this.getBalance(userId);
 
     if (currentBalance < entryFee) {
       throw new Error('Insufficient balance for tournament entry');
     }
 
-    const transaction = await this.recordTransaction(
+    const transactionRecord = await this.recordTransaction(
       userId,
       'tournament_entry',
       -entryFee,
       {
         tournamentId,
         description: `Tournament entry fee: ${entryFee} Chuta`
-      }
+      },
+      transaction
     );
 
     return {
       success: true,
-      newBalance: parseFloat(transaction.balanceAfter)
+      newBalance: parseFloat(transactionRecord.balanceAfter)
     };
   }
 
@@ -458,10 +491,18 @@ class QuizWalletService {
    * @param {Array<{userId: number, entryFee: number}>} refunds - Array of refund objects
    * @returns {Promise<{success: boolean, refundCount: number, totalRefunded: number}>}
    */
-  async refundTournamentEntries(tournamentId, refunds) {
+  /**
+   * @param {string} tournamentId
+   * @param {Array<{userId: number, entryFee: number}>} refunds
+   * @param {import('sequelize').Transaction} [externalTransaction] - Pass the
+   *   caller's transaction to make the refund atomic with whatever else the
+   *   caller does (e.g. destroying the participant row). If omitted, runs in
+   *   its own transaction as before.
+   */
+  async refundTournamentEntries(tournamentId, refunds, externalTransaction = null) {
     let totalRefunded = 0;
 
-    await sequelize.transaction(async (t) => {
+    const run = async (t) => {
       for (const { userId, entryFee } of refunds) {
         await this.recordTransaction(
           userId,
@@ -475,7 +516,13 @@ class QuizWalletService {
         );
         totalRefunded += entryFee;
       }
-    });
+    };
+
+    if (externalTransaction) {
+      await run(externalTransaction);
+    } else {
+      await sequelize.transaction(run);
+    }
 
     return {
       success: true,

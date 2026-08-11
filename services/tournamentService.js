@@ -1,12 +1,52 @@
 const sequelize = require('../config/db');
-const { Op } = require('sequelize');
+const { Op, fn, col } = require('sequelize');
 const QuizTournament = require('../models/QuizTournament');
 const QuizTournamentParticipant = require('../models/QuizTournamentParticipant');
 const QuizTournamentRound = require('../models/QuizTournamentRound');
+const QuizTournamentAnswer = require('../models/QuizTournamentAnswer');
 const QuizMatch = require('../models/QuizMatch');
 const UserQuizStats = require('../models/UserQuizStats');
 const questionService = require('./questionService');
 const quizWalletService = require('./quizWalletService');
+
+const SHARED_QUESTION_FORMATS = ['classic', 'speed_run', 'battle_royale'];
+const QUESTIONS_PER_ROUND = 10;
+const ROUND_MAX_DURATION_MS = (QUESTIONS_PER_ROUND * 15 + 30) * 1000; // 15s/question ceiling + buffer
+
+/**
+ * Emit a socket event to a specific user if connected, or queue it for
+ * delivery on reconnect. Mirrors lobbyService's `_emitToUser`/`sendOrQueue`
+ * usage so tournament and lobby notifications behave consistently.
+ */
+function emitToUser(userId, event, payload) {
+  try {
+    const websocketManager = require('./websocketManager');
+    websocketManager.sendOrQueue(userId, event, payload);
+  } catch (e) {
+    console.error(`[TournamentService] Failed to emit '${event}' to user ${userId}:`, e.message);
+  }
+}
+
+function emitToTournamentRoom(tournamentId, event, payload) {
+  try {
+    const websocketManager = require('./websocketManager');
+    if (websocketManager.io) {
+      websocketManager.io.to(`tournament:${tournamentId}`).emit(event, payload);
+    }
+  } catch (e) {
+    console.error(`[TournamentService] Failed to broadcast '${event}' for tournament ${tournamentId}:`, e.message);
+  }
+}
+
+/** Fisher-Yates shuffle — used for random bracket seeding. */
+function shuffle(array) {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
 
 /**
  * Tournament Service
@@ -25,15 +65,15 @@ const quizWalletService = require('./quizWalletService');
  * - Battle Royale: Bottom 25% eliminated each round
  */
 
+const VALID_TOURNAMENT_FORMATS = ['speed_run', 'classic', 'knockout', 'battle_royale'];
+
 class TournamentService {
   /**
-   * Create a new tournament
-   * 
-   * @param {number} adminId - Admin user ID
-   * @param {Object} config - Tournament configuration
-   * @returns {Promise<{success: boolean, tournamentId: string, tournament: Object}>}
+   * Shared validation for both admin-created and user-proposed tournaments —
+   * everything except who's allowed to create one and what status it starts
+   * in is identical.
    */
-  async createTournament(adminId, config) {
+  _validateTournamentConfig(config) {
     const {
       name,
       description,
@@ -47,23 +87,22 @@ class TournamentService {
       startTime
     } = config;
 
-    // Validate required fields
     if (!name || !format || entryFee === undefined || !categoryId || !registrationDeadline || !startTime) {
       throw new Error('Missing required fields: name, format, entryFee, categoryId, registrationDeadline, startTime');
     }
 
-    // Validate format
-    const validFormats = ['speed_run', 'classic', 'knockout', 'battle_royale'];
-    if (!validFormats.includes(format)) {
-      throw new Error(`Invalid format. Must be one of: ${validFormats.join(', ')}`);
+    if (!VALID_TOURNAMENT_FORMATS.includes(format)) {
+      throw new Error(`Invalid format. Must be one of: ${VALID_TOURNAMENT_FORMATS.join(', ')}`);
     }
 
-    // Validate entry fee
     if (entryFee < 0) {
       throw new Error('Entry fee must be non-negative');
     }
 
-    // Validate dates
+    if (maxParticipants !== undefined && maxParticipants !== null && maxParticipants < minParticipants) {
+      throw new Error('maxParticipants cannot be less than minParticipants');
+    }
+
     const regDeadline = new Date(registrationDeadline);
     const tournamentStart = new Date(startTime);
     const now = new Date();
@@ -76,21 +115,13 @@ class TournamentService {
       throw new Error('Start time must be after registration deadline');
     }
 
-    // Apply default prize distribution if not provided
-    const finalPrizeDistribution = prizeDistribution || {
-      first: 60,
-      second: 30,
-      third: 10
-    };
-
-    // Validate prize distribution sums to 100
+    const finalPrizeDistribution = prizeDistribution || { first: 60, second: 30, third: 10 };
     const total = Object.values(finalPrizeDistribution).reduce((sum, val) => sum + val, 0);
     if (Math.abs(total - 100) > 0.01) {
       throw new Error('Prize distribution must sum to 100%');
     }
 
-    // Create tournament
-    const tournament = await QuizTournament.create({
+    return {
       name,
       description,
       format,
@@ -100,7 +131,22 @@ class TournamentService {
       maxParticipants,
       minParticipants,
       registrationDeadline: regDeadline,
-      startTime: tournamentStart,
+      startTime: tournamentStart
+    };
+  }
+
+  /**
+   * Create a new tournament (admin path — goes straight to 'open', no review).
+   *
+   * @param {number} adminId - Admin user ID
+   * @param {Object} config - Tournament configuration
+   * @returns {Promise<{success: boolean, tournamentId: string, tournament: Object}>}
+   */
+  async createTournament(adminId, config) {
+    const built = this._validateTournamentConfig(config);
+
+    const tournament = await QuizTournament.create({
+      ...built,
       status: 'open',
       currentRound: 0,
       prizePool: 0,
@@ -112,6 +158,109 @@ class TournamentService {
       tournamentId: tournament.id,
       tournament
     };
+  }
+
+  /**
+   * Propose a user-hosted tournament — same validation as an admin-created
+   * one, but starts in 'pending_review' and only becomes visible/joinable
+   * once an admin approves it (see approveTournamentProposal).
+   *
+   * @param {number} userId - Proposing user's ID
+   * @param {Object} config - Tournament configuration
+   */
+  async proposeTournament(userId, config) {
+    const built = this._validateTournamentConfig(config);
+
+    const tournament = await QuizTournament.create({
+      ...built,
+      status: 'pending_review',
+      currentRound: 0,
+      prizePool: 0,
+      createdBy: userId,
+      proposedBy: userId
+    });
+
+    return {
+      success: true,
+      tournamentId: tournament.id,
+      tournament
+    };
+  }
+
+  /**
+   * List pending tournament proposals for admin review.
+   */
+  async listProposals(options = {}) {
+    const { page = 1, limit = 20 } = options;
+    const offset = (page - 1) * limit;
+
+    const { count, rows } = await QuizTournament.findAndCountAll({
+      where: { status: 'pending_review' },
+      limit,
+      offset,
+      order: [['createdAt', 'ASC']]
+    });
+
+    return {
+      proposals: rows,
+      totalCount: count,
+      page,
+      totalPages: Math.ceil(count / limit)
+    };
+  }
+
+  /**
+   * Approve a pending proposal — opens it for registration exactly like an
+   * admin-created tournament from this point on.
+   */
+  async approveTournamentProposal(tournamentId, adminId) {
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    if (!tournament) {
+      throw new Error('Tournament not found');
+    }
+    if (tournament.status !== 'pending_review') {
+      throw new Error('Only pending-review proposals can be approved');
+    }
+
+    await tournament.update({
+      status: 'open',
+      reviewedBy: adminId,
+      reviewedAt: new Date()
+    });
+
+    if (tournament.proposedBy) {
+      emitToUser(tournament.proposedBy, 'tournament_proposal_approved', { tournamentId });
+    }
+
+    return { success: true, tournament };
+  }
+
+  /**
+   * Reject a pending proposal — no money has moved yet at this stage
+   * (proposals don't collect entry fees, only registration does), so there's
+   * nothing to refund.
+   */
+  async rejectTournamentProposal(tournamentId, adminId, reason) {
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    if (!tournament) {
+      throw new Error('Tournament not found');
+    }
+    if (tournament.status !== 'pending_review') {
+      throw new Error('Only pending-review proposals can be rejected');
+    }
+
+    await tournament.update({
+      status: 'rejected',
+      reviewedBy: adminId,
+      reviewedAt: new Date(),
+      rejectionReason: reason || null
+    });
+
+    if (tournament.proposedBy) {
+      emitToUser(tournament.proposedBy, 'tournament_proposal_rejected', { tournamentId, reason: reason || null });
+    }
+
+    return { success: true };
   }
 
   /**
@@ -129,8 +278,8 @@ class TournamentService {
     }
 
     // Check if modifications are allowed
-    if (tournament.status !== 'draft' && tournament.status !== 'open') {
-      throw new Error('Cannot modify tournament after registration has participants');
+    if (!['draft', 'pending_review', 'open'].includes(tournament.status)) {
+      throw new Error('Cannot modify tournament after it has started');
     }
 
     // Check if any participants have registered
@@ -144,9 +293,8 @@ class TournamentService {
 
     // Validate updates if they include certain fields
     if (updates.format) {
-      const validFormats = ['speed_run', 'classic', 'knockout', 'battle_royale'];
-      if (!validFormats.includes(updates.format)) {
-        throw new Error(`Invalid format. Must be one of: ${validFormats.join(', ')}`);
+      if (!VALID_TOURNAMENT_FORMATS.includes(updates.format)) {
+        throw new Error(`Invalid format. Must be one of: ${VALID_TOURNAMENT_FORMATS.join(', ')}`);
       }
     }
 
@@ -172,53 +320,62 @@ class TournamentService {
    * @param {number} userId - User ID
    * @returns {Promise<{success: boolean, entryFeePaid: number, registrationId: string}>}
    */
-  async registerParticipant(tournamentId, userId) {
-    const tournament = await QuizTournament.findByPk(tournamentId);
+  async registerParticipant(tournamentId, userId, options = {}) {
+    const { ip = null } = options;
 
-    if (!tournament) {
-      throw new Error('Tournament not found');
-    }
-
-    // Check tournament status
-    if (tournament.status !== 'open') {
-      throw new Error('Tournament registration is not open');
-    }
-
-    // Check registration deadline
-    if (new Date() > new Date(tournament.registrationDeadline)) {
-      throw new Error('Registration deadline has passed');
-    }
-
-    // Check if already registered
-    const existing = await QuizTournamentParticipant.findOne({
-      where: { tournamentId, userId }
-    });
-
-    if (existing) {
-      throw new Error('Already registered for this tournament');
-    }
-
-    // Check max participants
-    if (tournament.maxParticipants) {
-      const currentCount = await QuizTournamentParticipant.count({
-        where: { tournamentId }
+    // Everything — the capacity check, the balance check+debit, and the
+    // participant insert — happens inside one transaction, with the
+    // tournament row locked for its duration. That closes both known races:
+    // two concurrent registrations can no longer both slip past the
+    // maxParticipants check (they're serialized on the tournament row lock),
+    // and deductTournamentEntry's own per-user advisory lock (see
+    // quizWalletService.lockUserWallet) prevents the same user's balance
+    // check from being read twice before either debit commits.
+    const result = await sequelize.transaction(async (t) => {
+      const tournament = await QuizTournament.findByPk(tournamentId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE
       });
 
-      if (currentCount >= tournament.maxParticipants) {
-        throw new Error('Tournament is full');
+      if (!tournament) {
+        throw new Error('Tournament not found');
       }
-    }
 
-    // Verify user balance
-    const balanceCheck = await quizWalletService.verifyBalance(userId, tournament.entryFee);
-    if (!balanceCheck.sufficient) {
-      throw new Error(`Insufficient balance. You have ${balanceCheck.currentBalance} Chuta, need ${tournament.entryFee} Chuta`);
-    }
+      if (tournament.status !== 'open') {
+        throw new Error('Tournament registration is not open');
+      }
 
-    // Use transaction for atomicity
-    const result = await sequelize.transaction(async (t) => {
-      // Deduct entry fee
-      await quizWalletService.deductTournamentEntry(userId, tournament.entryFee, tournamentId);
+      if (new Date() > new Date(tournament.registrationDeadline)) {
+        throw new Error('Registration deadline has passed');
+      }
+
+      const existing = await QuizTournamentParticipant.findOne({
+        where: { tournamentId, userId },
+        transaction: t
+      });
+
+      if (existing) {
+        throw new Error('Already registered for this tournament');
+      }
+
+      if (tournament.maxParticipants) {
+        const currentCount = await QuizTournamentParticipant.count({
+          where: { tournamentId },
+          transaction: t
+        });
+
+        if (currentCount >= tournament.maxParticipants) {
+          throw new Error('Tournament is full');
+        }
+      }
+
+      const balanceCheck = await quizWalletService.verifyBalance(userId, tournament.entryFee);
+      if (!balanceCheck.sufficient) {
+        throw new Error(`Insufficient balance. You have ${balanceCheck.currentBalance} Chuta, need ${tournament.entryFee} Chuta`);
+      }
+
+      // Deduct entry fee — atomic with everything else in this transaction
+      await quizWalletService.deductTournamentEntry(userId, tournament.entryFee, tournamentId, t);
 
       // Add to prize pool
       await tournament.increment('prizePool', { by: tournament.entryFee, transaction: t });
@@ -229,7 +386,8 @@ class TournamentService {
         userId,
         entryFeePaid: tournament.entryFee,
         status: 'registered',
-        currentRound: 0
+        currentRound: 0,
+        registrationIp: ip
       }, { transaction: t });
 
       return {
@@ -239,7 +397,40 @@ class TournamentService {
       };
     });
 
+    // Fire-and-forget fairness signal — never blocks or fails registration.
+    this._flagSuspiciousRegistration(tournamentId, userId, ip).catch(err => {
+      console.error('[TournamentService] Fairness check failed (non-critical):', err.message);
+    });
+
     return result;
+  }
+
+  /**
+   * Non-blocking collusion signal: flag (don't block) when a registration's IP
+   * matches another participant already registered for the same tournament.
+   * Real players sharing a wifi/cyber cafe is common and shouldn't be
+   * punished automatically — this only surfaces the pattern for admin review
+   * via the existing suspiciousActivityService violation counter.
+   */
+  async _flagSuspiciousRegistration(tournamentId, userId, ip) {
+    if (!ip) return;
+
+    const sameIpCount = await QuizTournamentParticipant.count({
+      where: {
+        tournamentId,
+        registrationIp: ip,
+        userId: { [Op.ne]: userId }
+      }
+    });
+
+    if (sameIpCount > 0) {
+      const suspiciousActivityService = require('./suspiciousActivityService');
+      await suspiciousActivityService.flagSuspiciousPattern(userId, {
+        reason: 'tournament_registration_same_ip',
+        tournamentId,
+        matchingParticipants: sameIpCount
+      });
+    }
   }
 
   /**
@@ -250,47 +441,54 @@ class TournamentService {
    * @returns {Promise<{success: boolean, refundAmount: number}>}
    */
   async unregisterParticipant(tournamentId, userId) {
-    const tournament = await QuizTournament.findByPk(tournamentId);
+    // The participant row is locked for the duration of the transaction, so
+    // two concurrent unregister calls for the same user can't both find it
+    // still present and both trigger a refund (the second waits for the
+    // first to commit the destroy, then legitimately gets "not registered").
+    return sequelize.transaction(async (t) => {
+      const tournament = await QuizTournament.findByPk(tournamentId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
 
-    if (!tournament) {
-      throw new Error('Tournament not found');
-    }
+      if (!tournament) {
+        throw new Error('Tournament not found');
+      }
 
-    // Check if can unregister
-    if (new Date() > new Date(tournament.registrationDeadline)) {
-      throw new Error('Cannot unregister after registration deadline');
-    }
+      if (new Date() > new Date(tournament.registrationDeadline)) {
+        throw new Error('Cannot unregister after registration deadline');
+      }
 
-    if (tournament.status !== 'open') {
-      throw new Error('Cannot unregister from this tournament');
-    }
+      if (tournament.status !== 'open') {
+        throw new Error('Cannot unregister from this tournament');
+      }
 
-    const participant = await QuizTournamentParticipant.findOne({
-      where: { tournamentId, userId }
-    });
+      const participant = await QuizTournamentParticipant.findOne({
+        where: { tournamentId, userId },
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
 
-    if (!participant) {
-      throw new Error('Not registered for this tournament');
-    }
+      if (!participant) {
+        throw new Error('Not registered for this tournament');
+      }
 
-    // Use transaction for atomicity
-    await sequelize.transaction(async (t) => {
-      // Refund entry fee
-      await quizWalletService.refundTournamentEntries(tournamentId, [
-        { userId, entryFee: participant.entryFeePaid }
-      ]);
+      const refundAmount = participant.entryFeePaid;
 
-      // Decrease prize pool
-      await tournament.decrement('prizePool', { by: participant.entryFeePaid, transaction: t });
+      await quizWalletService.refundTournamentEntries(
+        tournamentId,
+        [{ userId, entryFee: refundAmount }],
+        t
+      );
 
-      // Remove participant
+      await tournament.decrement('prizePool', { by: refundAmount, transaction: t });
       await participant.destroy({ transaction: t });
-    });
 
-    return {
-      success: true,
-      refundAmount: participant.entryFeePaid
-    };
+      return {
+        success: true,
+        refundAmount
+      };
+    });
   }
 
   /**
@@ -359,48 +557,82 @@ class TournamentService {
    * @returns {Promise<{success: boolean, startTime: Date}>}
    */
   async startTournament(tournamentId) {
-    const tournament = await QuizTournament.findByPk(tournamentId);
+    // Lock the tournament row for the status-transition + rounds calculation,
+    // so a cron auto-start and a manual admin start racing each other can't
+    // both flip it to in_progress and both call executeRound(1).
+    const { totalRounds, participantCount } = await sequelize.transaction(async (t) => {
+      const tournament = await QuizTournament.findByPk(tournamentId, {
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
 
-    if (!tournament) {
-      throw new Error('Tournament not found');
-    }
+      if (!tournament) {
+        throw new Error('Tournament not found');
+      }
 
-    if (tournament.status !== 'open') {
-      throw new Error('Tournament cannot be started');
-    }
+      if (tournament.status !== 'open') {
+        throw new Error('Tournament cannot be started');
+      }
 
-    // Check minimum participants
-    const participantCount = await QuizTournamentParticipant.count({
-      where: { tournamentId, status: 'registered' }
+      const count = await QuizTournamentParticipant.count({
+        where: { tournamentId, status: 'registered' },
+        transaction: t
+      });
+
+      if (count < tournament.minParticipants) {
+        throw new Error(`Insufficient participants. Need ${tournament.minParticipants}, have ${count}`);
+      }
+
+      // Calculate total rounds based on format
+      let rounds = 1;
+      if (tournament.format === 'knockout') {
+        rounds = Math.ceil(Math.log2(count));
+      } else if (tournament.format === 'battle_royale') {
+        let remaining = count;
+        rounds = 0;
+        while (remaining > 2) {
+          remaining = Math.ceil(remaining * 0.75); // Keep 75%, eliminate 25%
+          rounds++;
+        }
+        rounds++; // Final round
+      }
+
+      await QuizTournamentParticipant.update(
+        { status: 'active' },
+        { where: { tournamentId, status: 'registered' }, transaction: t }
+      );
+
+      await tournament.update({
+        status: 'in_progress',
+        startTime: new Date(),
+        totalRounds: rounds,
+        currentRound: 0
+      }, { transaction: t });
+
+      return { totalRounds: rounds, participantCount: count };
     });
 
-    if (participantCount < tournament.minParticipants) {
-      throw new Error(`Insufficient participants. Need ${tournament.minParticipants}, have ${participantCount}`);
+    const tournament = await QuizTournament.findByPk(tournamentId);
+
+    try {
+      require('./websocketManager').broadcastTournamentStarted(tournamentId, {
+        format: tournament.format,
+        participantCount,
+        totalRounds,
+        startTime: tournament.startTime
+      });
+    } catch (e) {
+      console.error('[TournamentService] broadcastTournamentStarted failed:', e.message);
     }
 
-    // Calculate total rounds based on format
-    let totalRounds = 1;
-    if (tournament.format === 'knockout') {
-      totalRounds = Math.ceil(Math.log2(participantCount));
-    } else if (tournament.format === 'battle_royale') {
-      // Calculate rounds needed to eliminate to final 2
-      let remaining = participantCount;
-      totalRounds = 0;
-      while (remaining > 2) {
-        remaining = Math.ceil(remaining * 0.75); // Keep 75%, eliminate 25%
-        totalRounds++;
-      }
-      totalRounds++; // Final round
-    }
-
-    // Update tournament status
-    tournament.status = 'active';
-    tournament.startTime = new Date();
-    await tournament.save();
+    // Kick off round 1. Errors here shouldn't leave the tournament stuck in
+    // 'in_progress' with no round — surface them, the admin can retry/cancel.
+    await this.executeRound(tournamentId, 1);
 
     return {
       success: true,
-      startTime: tournament.startTime
+      startTime: tournament.startTime,
+      totalRounds
     };
   }
 
@@ -463,156 +695,482 @@ class TournamentService {
   }
 
   /**
-   * Execute a tournament round
-   * 
+   * Execute (start) a tournament round — creates the round record and hands
+   * off to the format-specific starter. Idempotent: if the round already
+   * exists (e.g. a cron sweep and a match-completion callback both tried to
+   * advance at once), this is a silent no-op rather than a duplicate round.
+   *
    * @param {string} tournamentId - Tournament UUID
    * @param {number} roundNumber - Round number
-   * @returns {Promise<void>}
    */
   async executeRound(tournamentId, roundNumber) {
     const tournament = await QuizTournament.findByPk(tournamentId);
-
     if (!tournament) {
       throw new Error('Tournament not found');
     }
 
-    // Get active participants
     const participants = await QuizTournamentParticipant.findAll({
-      where: {
-        tournamentId,
-        status: { [Op.in]: ['registered', 'active'] }
-      }
+      where: { tournamentId, status: 'active' }
     });
 
-    // Select questions for this round
-    const questions = await questionService.selectBalancedQuestions(tournament.categoryId, 10);
-    const questionIds = questions.map(q => q.id);
-
-    // Track question usage
-    for (const question of questions) {
-      await questionService.trackQuestionUsage(question.id);
+    let round;
+    try {
+      round = await QuizTournamentRound.create({
+        tournamentId,
+        roundNumber,
+        questions: [],
+        participants: participants.map(p => ({ userId: p.userId, score: 0, completionTime: null, rank: null })),
+        eliminatedUsers: [],
+        status: 'pending'
+      });
+    } catch (err) {
+      if (err.name === 'SequelizeUniqueConstraintError') {
+        console.warn(`[TournamentService] Round ${roundNumber} for tournament ${tournamentId} already exists, skipping duplicate start`);
+        return;
+      }
+      throw err;
     }
 
-    // Create round record
-    const round = await QuizTournamentRound.create({
-      tournamentId,
-      roundNumber,
-      questions: questionIds,
-      participants: participants.map(p => ({
-        userId: p.userId,
-        score: 0,
-        completionTime: null,
-        rank: null
-      })),
-      eliminatedUsers: [],
+    if (tournament.format === 'knockout') {
+      await this._startKnockoutRound(tournament, round, participants);
+    } else {
+      await this._startSharedQuestionRound(tournament, round, participants);
+    }
+  }
+
+  // =======================================================================
+  // Knockout format — real head-to-head matches, reusing the 1v1 lobby
+  // engine (lobbyService/QuizMatch) rather than reinventing scoring.
+  // =======================================================================
+
+  /**
+   * Pair participants for a knockout round and create a real QuizMatch per
+   * pair. No escrow/wager — entry fees were already collected at
+   * registration, so matches start directly 'active' (no accept/decline
+   * dance). Each match gets its own independently-drawn question set to
+   * avoid two simultaneous pairs in the same round being able to relay
+   * answers to each other.
+   */
+  async _startKnockoutRound(tournament, round, participants) {
+    const shuffled = shuffle(participants);
+    const roundEntries = [];
+    let byeUserId = null;
+
+    if (shuffled.length % 2 === 1) {
+      byeUserId = shuffled.pop().userId;
+    }
+
+    const matchPromises = [];
+    for (let i = 0; i < shuffled.length; i += 2) {
+      matchPromises.push(this._createKnockoutMatch(tournament, round, shuffled[i], shuffled[i + 1]));
+    }
+    const matches = await Promise.all(matchPromises);
+
+    for (const { p1, p2, match } of matches) {
+      roundEntries.push({ userId: p1.userId, matchId: match.id, score: 0, completionTime: null, rank: null });
+      roundEntries.push({ userId: p2.userId, matchId: match.id, score: 0, completionTime: null, rank: null });
+    }
+    if (byeUserId !== null) {
+      roundEntries.push({ userId: byeUserId, matchId: null, bye: true, score: 0, completionTime: null, rank: null });
+    }
+
+    await round.update({
+      participants: roundEntries,
       status: 'active',
       startedAt: new Date()
     });
 
-    // Execute format-specific logic
-    switch (tournament.format) {
-      case 'speed_run':
-        await this.executeSpeedRun(tournament, round, participants);
-        break;
-      case 'classic':
-        await this.executeClassic(tournament, round, participants);
-        break;
-      case 'knockout':
-        await this.executeKnockout(tournament, round, participants);
-        break;
-      case 'battle_royale':
-        await this.executeBattleRoyale(tournament, round, participants);
-        break;
+    emitToTournamentRoom(tournament.id, 'round_started', {
+      tournamentId: tournament.id,
+      roundNumber: round.roundNumber,
+      format: 'knockout',
+      matchCount: matches.length,
+      byeUserId
+    });
+
+    if (byeUserId !== null) {
+      emitToUser(byeUserId, 'tournament_bye', { tournamentId: tournament.id, roundNumber: round.roundNumber });
+    }
+  }
+
+  async _createKnockoutMatch(tournament, round, p1, p2) {
+    const questions = await questionService.selectBalancedQuestions(tournament.categoryId, QUESTIONS_PER_ROUND);
+    const questionIds = questions.map(q => q.id);
+    for (const q of questions) {
+      await questionService.trackQuestionUsage(q.id);
+    }
+
+    const questionStartTimesRaw = {};
+    questionIds.forEach(qId => { questionStartTimesRaw[qId] = null; });
+
+    const match = await QuizMatch.create({
+      matchType: 'tournament',
+      tournamentId: tournament.id,
+      roundNumber: round.roundNumber,
+      categoryId: tournament.categoryId,
+      challengerId: p1.userId,
+      opponentId: p2.userId,
+      participants: [
+        { userId: p1.userId, wagerAmount: 0, status: 'active', score: 0, completionTime: null, answers: [] },
+        { userId: p2.userId, wagerAmount: 0, status: 'active', score: 0, completionTime: null, answers: [] }
+      ],
+      questions: questionIds,
+      questionStartTimes: JSON.parse(JSON.stringify(questionStartTimesRaw)),
+      status: 'active',
+      escrowAmount: 0,
+      startedAt: new Date()
+    });
+
+    const questionsForClient = questions.map(q => ({
+      id: q.id,
+      questionText: q.questionText,
+      options: q.options,
+      difficulty: q.difficulty
+    }));
+
+    const [p1Stats, p2Stats] = await Promise.all([
+      UserQuizStats.findOne({ where: { userId: p1.userId }, attributes: ['userId', 'nickname', 'avatarUrl'] }),
+      UserQuizStats.findOne({ where: { userId: p2.userId }, attributes: ['userId', 'nickname', 'avatarUrl'] })
+    ]);
+
+    // Reuse the exact 'challenge_accepted' shape the lobby's Gameplay screen
+    // already knows how to render — a tournament knockout match is, from the
+    // client's perspective, just a match with a different starting screen.
+    emitToUser(p1.userId, 'challenge_accepted', {
+      challengeId: match.id, matchId: match.id, startTime: match.startedAt, questions: questionsForClient,
+      tournamentId: tournament.id, roundNumber: round.roundNumber,
+      opponent: { userId: p2.userId, nickname: p2Stats?.nickname || `Player_${p2.userId}`, avatarUrl: p2Stats?.avatarUrl || null }
+    });
+    emitToUser(p2.userId, 'challenge_accepted', {
+      challengeId: match.id, matchId: match.id, startTime: match.startedAt, questions: questionsForClient,
+      tournamentId: tournament.id, roundNumber: round.roundNumber,
+      opponent: { userId: p1.userId, nickname: p1Stats?.nickname || `Player_${p1.userId}`, avatarUrl: p1Stats?.avatarUrl || null }
+    });
+
+    return { p1, p2, match };
+  }
+
+  /**
+   * Called by lobbyService.endMatch when a tournament-type match finishes
+   * (normal completion or forfeit). Checks whether every match in this round
+   * has finished, and if so, advances the bracket.
+   */
+  async onTournamentMatchEnded(match) {
+    const tournament = await QuizTournament.findByPk(match.tournamentId);
+    if (!tournament || tournament.status !== 'in_progress') return;
+
+    const stillPlaying = await QuizMatch.count({
+      where: {
+        tournamentId: match.tournamentId,
+        roundNumber: match.roundNumber,
+        status: { [Op.ne]: 'completed' }
+      }
+    });
+    if (stillPlaying > 0) return; // other pairs in this round are still playing
+
+    await sequelize.transaction(async (t) => {
+      const round = await QuizTournamentRound.findOne({
+        where: { tournamentId: match.tournamentId, roundNumber: match.roundNumber },
+        transaction: t,
+        lock: t.LOCK.UPDATE
+      });
+      if (!round || round.status === 'completed') return; // already handled by a concurrent caller
+
+      const roundMatches = await QuizMatch.findAll({
+        where: { tournamentId: match.tournamentId, roundNumber: match.roundNumber },
+        transaction: t
+      });
+
+      const qualifyingUserIds = roundMatches.map(m => m.winnerId).filter(Boolean);
+      const byeEntry = round.participants.find(p => p.bye);
+      if (byeEntry) qualifyingUserIds.push(byeEntry.userId);
+
+      const updatedEntries = round.participants.map(entry => {
+        if (entry.bye) return entry;
+        const m = roundMatches.find(rm => rm.id === entry.matchId);
+        if (!m) return entry;
+        const mp = m.participants.find(p => p.userId === entry.userId);
+        return { ...entry, score: mp?.score ?? 0, completionTime: mp?.completionTime ?? null };
+      });
+
+      round.eliminatedUsers = roundMatches.map(m => {
+        const loserEntry = m.participants.find(p => p.userId !== m.winnerId);
+        return loserEntry?.userId;
+      }).filter(Boolean);
+      round.participants = updatedEntries;
+      round.changed('participants', true);
+      round.changed('eliminatedUsers', true);
+      await round.update({ status: 'completed', completedAt: new Date() }, { transaction: t });
+    });
+
+    const finishedRound = await QuizTournamentRound.findOne({
+      where: { tournamentId: match.tournamentId, roundNumber: match.roundNumber }
+    });
+    try {
+      require('./websocketManager').broadcastRoundEnded(match.tournamentId, {
+        roundNumber: match.roundNumber,
+        results: finishedRound.participants
+      });
+    } catch (e) {
+      console.error('[TournamentService] broadcastRoundEnded failed:', e.message);
+    }
+
+    await this._finishRoundAndContinue(tournament, match.roundNumber, this._collectKnockoutQualifiers);
+  }
+
+  async _collectKnockoutQualifiers(tournamentId, roundNumber) {
+    const round = await QuizTournamentRound.findOne({ where: { tournamentId, roundNumber } });
+    const matches = await QuizMatch.findAll({ where: { tournamentId, roundNumber } });
+    const qualifiers = matches.map(m => m.winnerId).filter(Boolean);
+    const byeEntry = round.participants.find(p => p.bye);
+    if (byeEntry) qualifiers.push(byeEntry.userId);
+    return qualifiers;
+  }
+
+  // =======================================================================
+  // Shared-question-set formats (classic, speed_run, battle_royale) — every
+  // active participant answers the same question set independently.
+  // =======================================================================
+
+  async _startSharedQuestionRound(tournament, round, participants) {
+    const questions = await questionService.selectBalancedQuestions(tournament.categoryId, QUESTIONS_PER_ROUND);
+    const questionIds = questions.map(q => q.id);
+    for (const q of questions) {
+      await questionService.trackQuestionUsage(q.id);
+    }
+
+    await round.update({
+      questions: questionIds,
+      status: 'active',
+      startedAt: new Date()
+    });
+
+    const questionsForClient = questions.map(q => ({
+      id: q.id, questionText: q.questionText, options: q.options, difficulty: q.difficulty
+    }));
+
+    emitToTournamentRoom(tournament.id, 'round_started', {
+      tournamentId: tournament.id,
+      roundNumber: round.roundNumber,
+      format: tournament.format,
+      questions: questionsForClient,
+      startTime: round.startedAt
+    });
+  }
+
+  /**
+   * Submit an answer for a shared-question-set tournament round.
+   * Mirrors lobbyService.submitAnswer's locking/timing/scoring pattern.
+   */
+  async submitAnswer(tournamentId, roundNumber, userId, questionId, answerId, clientTimestamp) {
+    const roundComplete = await sequelize.transaction(async (t) => {
+      const round = await QuizTournamentRound.findOne({
+        where: { tournamentId, roundNumber },
+        lock: t.LOCK.UPDATE,
+        transaction: t
+      });
+      if (!round) throw new Error('Round not found');
+      if (round.status !== 'active') throw new Error('Round is not active');
+      if (!round.questions.includes(questionId)) throw new Error('Invalid question for this round');
+
+      const participant = await QuizTournamentParticipant.findOne({
+        where: { tournamentId, userId, status: 'active' },
+        transaction: t
+      });
+      if (!participant) throw new Error('User is not an active participant in this tournament');
+
+      const existingAnswer = await QuizTournamentAnswer.findOne({
+        where: { roundId: round.id, userId, questionId },
+        transaction: t
+      });
+      if (existingAnswer) throw new Error('Question already answered');
+
+      const questionService_ = require('./questionService');
+      const question = await questionService_.getQuestionById(questionId, true);
+
+      const serverTime = Date.now();
+      const questionStartTime = round.questionStartTimes[questionId];
+      if (!questionStartTime) {
+        round.questionStartTimes[questionId] = serverTime;
+        round.changed('questionStartTimes', true);
+        await round.save({ transaction: t });
+      }
+
+      const elapsed = (serverTime - (questionStartTime || serverTime)) / 1000;
+      let finalAnswerId = answerId;
+      if (elapsed > 12 && finalAnswerId.toLowerCase() !== 'timeout') {
+        finalAnswerId = 'timeout';
+      }
+
+      const clientTimeInt = Math.floor(Number(clientTimestamp));
+      const latency = serverTime - clientTimeInt;
+      const adjustedTime = Math.max(elapsed - (latency / 1000), 0);
+
+      const isCorrect = (finalAnswerId.toLowerCase() !== 'timeout') && (question.correctAnswer === finalAnswerId.toLowerCase());
+      const lobbyService = require('./lobbyService');
+      const pointsEarned = isCorrect ? lobbyService.calculatePoints(question.difficulty, adjustedTime) : 0;
+
+      await QuizTournamentAnswer.create({
+        roundId: round.id,
+        tournamentId,
+        userId,
+        questionId,
+        selectedAnswer: finalAnswerId.toLowerCase(),
+        isCorrect,
+        responseTime: adjustedTime,
+        clientTimestamp: clientTimeInt || serverTime,
+        serverTimestamp: serverTime,
+        latency: Math.floor(latency)
+      }, { transaction: t });
+
+      const entry = round.participants.find(p => p.userId === userId);
+      if (entry) {
+        entry.score = (entry.score || 0) + pointsEarned;
+        entry.answers = entry.answers || [];
+        entry.answers.push(questionId);
+        round.changed('participants', true);
+        await round.save({ transaction: t });
+      }
+
+      const activeEntries = round.participants.filter(p => !p.bye);
+      const allDone = activeEntries.length > 0 && activeEntries.every(p => (p.answers?.length || 0) >= round.questions.length);
+
+      return { isCorrect, correctAnswer: question.correctAnswer, pointsEarned, adjustedTime, allDone };
+    });
+
+    if (roundComplete.allDone) {
+      setTimeout(() => {
+        this._completeSharedQuestionRound(tournamentId, roundNumber).catch(err => {
+          console.error('[TournamentService] _completeSharedQuestionRound failed:', err.message);
+        });
+      }, 0);
+    }
+
+    return {
+      success: true,
+      correct: roundComplete.isCorrect,
+      correctAnswer: roundComplete.correctAnswer,
+      pointsEarned: roundComplete.pointsEarned,
+      responseTime: roundComplete.adjustedTime
+    };
+  }
+
+  async _completeSharedQuestionRound(tournamentId, roundNumber) {
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    if (!tournament) return;
+
+    const alreadyDone = await sequelize.transaction(async (t) => {
+      const round = await QuizTournamentRound.findOne({
+        where: { tournamentId, roundNumber },
+        lock: t.LOCK.UPDATE,
+        transaction: t
+      });
+      if (!round || round.status === 'completed') return true; // idempotent
+
+      // Compute completion time per participant from their answer trail
+      for (const entry of round.participants) {
+        if (entry.bye) continue;
+        const answers = await QuizTournamentAnswer.findAll({
+          where: { roundId: round.id, userId: entry.userId },
+          order: [['createdAt', 'ASC']],
+          transaction: t
+        });
+        if (answers.length > 0) {
+          entry.completionTime = new Date(answers[answers.length - 1].createdAt) - new Date(answers[0].createdAt);
+        } else {
+          entry.completionTime = null;
+        }
+      }
+      round.changed('participants', true);
+      await round.update({ status: 'completed', completedAt: new Date() }, { transaction: t });
+      return false;
+    });
+
+    if (alreadyDone) return;
+
+    const round = await QuizTournamentRound.findOne({ where: { tournamentId, roundNumber } });
+
+    // Accumulate cumulative totals + refresh average response time from the
+    // full answer history (cheap at tournament scale, always correct).
+    for (const entry of round.participants) {
+      if (entry.bye) continue;
+      const participant = await QuizTournamentParticipant.findOne({ where: { tournamentId, userId: entry.userId } });
+      if (!participant || participant.status !== 'active') continue;
+
+      const avgRow = await QuizTournamentAnswer.findOne({
+        where: { tournamentId, userId: entry.userId },
+        attributes: [[fn('AVG', col('response_time')), 'avgTime']],
+        raw: true
+      });
+
+      await participant.update({
+        totalScore: (participant.totalScore || 0) + (entry.score || 0),
+        averageTime: avgRow?.avgTime != null ? parseFloat(avgRow.avgTime) : participant.averageTime
+      });
+    }
+
+    try {
+      require('./websocketManager').broadcastRoundEnded(tournamentId, {
+        roundNumber,
+        results: round.participants
+      });
+    } catch (e) {
+      console.error('[TournamentService] broadcastRoundEnded failed:', e.message);
+    }
+
+    if (tournament.format === 'battle_royale') {
+      await this._eliminateBattleRoyaleRound(tournament, round);
+    }
+
+    await this._finishRoundAndContinue(tournament, roundNumber, async () => {
+      const survivors = await QuizTournamentParticipant.findAll({ where: { tournamentId, status: 'active' } });
+      return survivors.map(p => p.userId);
+    });
+  }
+
+  async _eliminateBattleRoyaleRound(tournament, round) {
+    const activeEntries = round.participants.filter(p => !p.bye);
+    if (activeEntries.length <= 2) return; // don't eliminate below the final showdown
+
+    const sorted = [...activeEntries].sort((a, b) => (b.score || 0) - (a.score || 0));
+    const eliminateCount = Math.max(0, Math.min(sorted.length - 2, Math.floor(sorted.length * 0.25)));
+    const toEliminate = sorted.slice(sorted.length - eliminateCount);
+
+    for (const entry of toEliminate) {
+      await QuizTournamentParticipant.update(
+        { status: 'eliminated', eliminatedAt: new Date() },
+        { where: { tournamentId: tournament.id, userId: entry.userId, status: 'active' } }
+      );
     }
   }
 
   /**
-   * Execute Speed Run format
-   * Rank by fastest correct completion time
+   * Shared tail-end for every round-completion path: bump tournament
+   * currentRound + mark non-qualifiers eliminated (via advanceToNextRound),
+   * then either move on to the next round or finalize the tournament.
    */
-  async executeSpeedRun(tournament, round, participants) {
-    // In real implementation, this would wait for all participants to complete
-    // For now, we'll simulate the ranking logic
-    
-    // Participants would answer questions via WebSocket
-    // After all complete, rank them
-    
-    // Placeholder: Mark round as completed
-    await round.update({
-      status: 'completed',
-      completedAt: new Date()
-    });
+  async _finishRoundAndContinue(tournament, roundNumber, getQualifyingUserIds) {
+    const qualifyingUserIds = await getQualifyingUserIds(tournament.id, roundNumber);
 
-    // If final round, distribute prizes
-    if (round.roundNumber === tournament.totalRounds) {
-      await this.distributePrizes(tournament.id);
+    if (roundNumber < tournament.totalRounds) {
+      await this.advanceToNextRound(tournament.id, roundNumber, qualifyingUserIds);
     }
-  }
 
-  /**
-   * Execute Classic format
-   * Rank by highest score with time tie-breaker
-   */
-  async executeClassic(tournament, round, participants) {
-    // Similar to Speed Run but different ranking criteria
-    
-    await round.update({
-      status: 'completed',
-      completedAt: new Date()
+    const remainingActive = await QuizTournamentParticipant.count({
+      where: { tournamentId: tournament.id, status: 'active' }
     });
 
-    if (round.roundNumber === tournament.totalRounds) {
-      await this.distributePrizes(tournament.id);
-    }
-  }
-
-  /**
-   * Execute Knockout format
-   * Bracket-style elimination
-   */
-  async executeKnockout(tournament, round, participants) {
-    // Pair participants for head-to-head matches
-    // Winners advance, losers eliminated
-    
-    await round.update({
-      status: 'completed',
-      completedAt: new Date()
-    });
-
-    // Advance winners to next round or distribute prizes if final
-    if (round.roundNumber === tournament.totalRounds) {
+    const isFinalRound = roundNumber >= tournament.totalRounds;
+    if (isFinalRound || remainingActive <= 1) {
       await this.distributePrizes(tournament.id);
     } else {
-      await this.executeRound(tournament.id, round.roundNumber + 1);
-    }
-  }
-
-  /**
-   * Execute Battle Royale format
-   * Eliminate bottom 25% each round
-   */
-  async executeBattleRoyale(tournament, round, participants) {
-    // All participants answer same questions
-    // Bottom 25% eliminated after each round
-    
-    const eliminateCount = Math.floor(participants.length * 0.25);
-    // Would eliminate lowest scorers here
-    
-    await round.update({
-      status: 'completed',
-      completedAt: new Date()
-    });
-
-    if (round.roundNumber === tournament.totalRounds) {
-      await this.distributePrizes(tournament.id);
-    } else {
-      await this.executeRound(tournament.id, round.roundNumber + 1);
+      await this.executeRound(tournament.id, roundNumber + 1);
     }
   }
 
   /**
    * Advance qualifying participants to next round
-   * 
+   *
    * @param {string} tournamentId - Tournament UUID
    * @param {number} currentRoundNumber - Current round number
    * @param {Array} qualifyingUserIds - Array of user IDs who qualified
@@ -623,11 +1181,6 @@ class TournamentService {
 
     if (!tournament) {
       throw new Error('Tournament not found');
-    }
-
-    // Validate round number
-    if (currentRoundNumber >= tournament.totalRounds) {
-      throw new Error('Cannot advance beyond final round');
     }
 
     // Update participants who qualified
@@ -674,66 +1227,183 @@ class TournamentService {
    * @param {string} tournamentId - Tournament UUID
    * @returns {Promise<void>}
    */
-  async distributePrizes(tournamentId) {
-    const tournament = await QuizTournament.findByPk(tournamentId);
-
-    if (!tournament) {
-      throw new Error('Tournament not found');
+  /**
+   * Rank participants for final placement. Knockout and battle_royale are
+   * elimination formats — how far you survived (currentRound) outranks raw
+   * score, exactly matching standard bracket 3rd-place resolution (the
+   * longer-surviving eliminee places above one knocked out earlier).
+   * Speed_run ranks "fastest correct completion": only participants who
+   * scored anything qualify for time-based ranking at all; zero-score
+   * participants (nothing answered correctly) rank last regardless of time.
+   * Classic ranks by total score, time as tiebreak.
+   */
+  _rankParticipants(format, participants) {
+    if (format === 'knockout' || format === 'battle_royale') {
+      return [...participants].sort((a, b) => {
+        if (b.currentRound !== a.currentRound) return b.currentRound - a.currentRound;
+        return (b.totalScore || 0) - (a.totalScore || 0);
+      });
     }
 
-    // Get final rankings
-    const participants = await QuizTournamentParticipant.findAll({
-      where: { tournamentId },
-      order: [
-        ['totalScore', 'DESC'],
-        ['averageTime', 'ASC']
-      ],
-      limit: 3
+    if (format === 'speed_run') {
+      const scored = participants.filter(p => (p.totalScore || 0) > 0);
+      const unscored = participants.filter(p => (p.totalScore || 0) <= 0);
+      scored.sort((a, b) => {
+        const timeA = a.averageTime == null ? Infinity : parseFloat(a.averageTime);
+        const timeB = b.averageTime == null ? Infinity : parseFloat(b.averageTime);
+        if (timeA !== timeB) return timeA - timeB;
+        return (b.totalScore || 0) - (a.totalScore || 0);
+      });
+      return [...scored, ...unscored];
+    }
+
+    // classic
+    return [...participants].sort((a, b) => {
+      if ((b.totalScore || 0) !== (a.totalScore || 0)) return (b.totalScore || 0) - (a.totalScore || 0);
+      const timeA = a.averageTime == null ? Infinity : parseFloat(a.averageTime);
+      const timeB = b.averageTime == null ? Infinity : parseFloat(b.averageTime);
+      return timeA - timeB;
+    });
+  }
+
+  /**
+   * Forfeit a participant, called when their socket disconnects and doesn't
+   * reconnect within the grace period (see websocketManager's
+   * handleReconnectionTimeout). For knockout, forfeits their live match
+   * (reusing lobbyService.forfeitMatch — the opponent wins automatically,
+   * which flows through onTournamentMatchEnded like a normal finish). For
+   * shared-question formats there's no match to forfeit; removing them from
+   * the active pool may itself be what was blocking the round from
+   * completing, so we re-check that here.
+   */
+  async forfeitTournament(tournamentId, userId) {
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    if (!tournament || tournament.status !== 'in_progress') {
+      return { success: false, reason: 'not_in_progress' };
+    }
+
+    const participant = await QuizTournamentParticipant.findOne({ where: { tournamentId, userId } });
+    if (!participant || participant.status !== 'active') {
+      return { success: false, reason: 'not_active_participant' };
+    }
+
+    await participant.update({ status: 'eliminated', eliminatedAt: new Date() });
+
+    if (tournament.format === 'knockout') {
+      const match = await QuizMatch.findOne({
+        where: {
+          tournamentId,
+          status: 'active',
+          [Op.or]: [{ challengerId: userId }, { opponentId: userId }]
+        }
+      });
+      if (match) {
+        const lobbyService = require('./lobbyService');
+        try {
+          await lobbyService.forfeitMatch(match.id, userId);
+        } catch (err) {
+          console.error('[TournamentService] forfeitMatch during tournament forfeit failed:', err.message);
+        }
+      }
+    } else {
+      const round = await QuizTournamentRound.findOne({
+        where: { tournamentId, roundNumber: tournament.currentRound + 1, status: 'active' }
+      });
+      if (round) {
+        const activeParticipants = await QuizTournamentParticipant.findAll({
+          where: { tournamentId, status: 'active' }
+        });
+        const stillUnfinished = activeParticipants.some(p => {
+          const entry = round.participants.find(rp => rp.userId === p.userId);
+          return !entry || (entry.answers?.length || 0) < round.questions.length;
+        });
+        if (activeParticipants.length === 0 || !stillUnfinished) {
+          this._completeSharedQuestionRound(tournamentId, round.roundNumber).catch(err => {
+            console.error('[TournamentService] _completeSharedQuestionRound after forfeit failed:', err.message);
+          });
+        }
+      }
+    }
+
+    emitToTournamentRoom(tournamentId, 'participant_forfeited', { tournamentId, userId });
+
+    return { success: true };
+  }
+
+  /**
+   * Finalize a tournament and pay out prizes. Idempotent under concurrency:
+   * the status flip to 'completed' happens inside a locked transaction
+   * first, so if this is somehow triggered twice (e.g. two near-simultaneous
+   * final-round completions), the second call sees 'completed' already and
+   * returns without a second award pass — this is the single most important
+   * guard in the whole engine, since a double-run here would double-pay
+   * prizes with real money.
+   */
+  async distributePrizes(tournamentId) {
+    const shouldProceed = await sequelize.transaction(async (t) => {
+      const tournament = await QuizTournament.findByPk(tournamentId, { transaction: t, lock: t.LOCK.UPDATE });
+      if (!tournament) throw new Error('Tournament not found');
+      if (tournament.status === 'completed' || tournament.status === 'cancelled') return false;
+
+      await tournament.update({ status: 'completed', completedAt: new Date() }, { transaction: t });
+      return true;
     });
 
-    if (participants.length === 0) {
-      return;
+    if (!shouldProceed) {
+      return { success: true, alreadyCompleted: true };
     }
+
+    const tournament = await QuizTournament.findByPk(tournamentId);
+    const allParticipants = await QuizTournamentParticipant.findAll({ where: { tournamentId } });
+
+    if (allParticipants.length === 0) {
+      return { success: true, winnersCount: 0 };
+    }
+
+    const ranked = this._rankParticipants(tournament.format, allParticipants).slice(0, 3);
 
     const prizePool = parseFloat(tournament.prizePool);
     const distribution = tournament.prizeDistribution;
-
-    // Calculate and award prizes
     const prizes = [
       { placement: 1, percentage: distribution.first || 60 },
       { placement: 2, percentage: distribution.second || 30 },
       { placement: 3, percentage: distribution.third || 10 }
     ];
 
-    for (let i = 0; i < Math.min(participants.length, 3); i++) {
-      const participant = participants[i];
+    for (let i = 0; i < ranked.length; i++) {
+      const participant = ranked[i];
       const prize = prizes[i];
       const prizeAmount = Math.floor((prizePool * prize.percentage) / 100);
 
-      // Award prize
-      await quizWalletService.awardTournamentPrize(
-        participant.userId,
-        prizeAmount,
-        tournamentId,
-        prize.placement
-      );
+      if (prizeAmount > 0) {
+        await quizWalletService.awardTournamentPrize(participant.userId, prizeAmount, tournamentId, prize.placement);
+      }
 
-      // Update participant
       await participant.update({
         placement: prize.placement,
         prizeWon: prizeAmount,
-        status: prize.placement === 1 ? 'winner' : 'active'
+        status: prize.placement === 1 ? 'winner' : participant.status
       });
 
-      // Update user stats
       await this.updateUserTournamentStats(participant.userId, tournament, prize.placement, prizeAmount);
+
+      emitToUser(participant.userId, 'tournament_ended', {
+        tournamentId,
+        placement: prize.placement,
+        prizeWon: prizeAmount
+      });
     }
 
-    // Mark tournament as completed
-    await tournament.update({
-      status: 'completed',
-      completedAt: new Date()
-    });
+    try {
+      require('./websocketManager').broadcastTournamentEnded(tournamentId, {
+        winnerId: ranked[0]?.userId || null,
+        placements: ranked.map((p, i) => ({ userId: p.userId, placement: i + 1, prizeWon: prizes[i] ? Math.floor((prizePool * prizes[i].percentage) / 100) : 0 }))
+      });
+    } catch (e) {
+      console.error('[TournamentService] broadcastTournamentEnded failed:', e.message);
+    }
+
+    return { success: true, winnersCount: ranked.length };
   }
 
   /**
@@ -766,6 +1436,18 @@ class TournamentService {
     });
   }
 
+/** Attach categoryName + currentParticipants to a plain tournament object (mutates and returns it). */
+  async _enrichTournament(tournamentJson) {
+    const QuizCategory = require('../models/QuizCategory');
+    const [category, currentParticipants] = await Promise.all([
+      tournamentJson.categoryId ? QuizCategory.findByPk(tournamentJson.categoryId, { attributes: ['name'] }) : null,
+      QuizTournamentParticipant.count({ where: { tournamentId: tournamentJson.id } })
+    ]);
+    tournamentJson.categoryName = category?.name || null;
+    tournamentJson.currentParticipants = currentParticipants;
+    return tournamentJson;
+  }
+
   /**
    * Get tournament details
    */
@@ -787,14 +1469,18 @@ class TournamentService {
   }
 
   /**
-   * Get tournaments list
+   * Public tournament listing — deliberately never surfaces 'draft',
+   * 'pending_review', or 'rejected' tournaments (unapproved proposals and
+   * admin drafts aren't other users' business). Admins reviewing proposals
+   * use listProposals() instead.
    */
   async getTournaments(options = {}) {
+    const PUBLIC_STATUSES = ['open', 'in_progress', 'completed', 'cancelled'];
     const { status, format, page = 1, limit = 20 } = options;
     const offset = (page - 1) * limit;
 
     const where = {};
-    if (status) where.status = status;
+    where.status = (status && PUBLIC_STATUSES.includes(status)) ? status : { [Op.in]: PUBLIC_STATUSES };
     if (format) where.format = format;
 
     const { count, rows } = await QuizTournament.findAndCountAll({
@@ -804,8 +1490,10 @@ class TournamentService {
       order: [['startTime', 'ASC']]
     });
 
+    const tournaments = await Promise.all(rows.map(r => this._enrichTournament(r.toJSON())));
+
     return {
-      tournaments: rows,
+      tournaments,
       totalCount: count,
       page,
       totalPages: Math.ceil(count / limit)
@@ -813,7 +1501,10 @@ class TournamentService {
   }
 
   /**
-   * Get tournament leaderboard
+   * Get tournament leaderboard — enriches each participant with their quiz
+   * nickname/avatar (not stored on QuizTournamentParticipant itself) and a
+   * live 1-indexed rank (distinct from `placement`, which stays null until
+   * the tournament actually finishes and prizes are paid out).
    */
   async getTournamentLeaderboard(tournamentId) {
     const tournament = await QuizTournament.findByPk(tournamentId);
@@ -822,20 +1513,138 @@ class TournamentService {
       throw new Error('Tournament not found');
     }
 
-    const participants = await QuizTournamentParticipant.findAll({
-      where: { tournamentId },
-      order: [
-        ['totalScore', 'DESC'],
-        ['averageTime', 'ASC']
-      ]
+    const participants = await QuizTournamentParticipant.findAll({ where: { tournamentId } });
+    const rankedInstances = this._rankParticipants(tournament.format, participants);
+
+    const statsRows = await UserQuizStats.findAll({
+      where: { userId: rankedInstances.map(p => p.userId) },
+      attributes: ['userId', 'nickname', 'avatarUrl']
     });
+    const statsMap = {};
+    statsRows.forEach(s => { statsMap[s.userId] = s; });
+
+    const ranked = rankedInstances.map((p, index) => ({
+      ...p.toJSON(),
+      rank: index + 1,
+      nickname: statsMap[p.userId]?.nickname || `Player_${p.userId}`,
+      avatarUrl: statsMap[p.userId]?.avatarUrl || null
+    }));
 
     return {
-      participants,
+      participants: ranked,
       currentRound: tournament.currentRound,
       totalRounds: tournament.totalRounds,
       status: tournament.status
     };
+  }
+
+  // =======================================================================
+  // Lifecycle automation — called by cron (see server.js setupQuizScheduledTasks)
+  // =======================================================================
+
+  /**
+   * Registration-deadline and start-time driven transitions. Runs
+   * frequently (every minute, matching the existing lobby-challenge-expiry
+   * cron cadence) so the gap between "should have started" and "actually
+   * started" stays small. Every tournament is handled independently and
+   * wrapped in try/catch so one bad tournament can't block the rest.
+   */
+  async runLifecycleSweep() {
+    const now = new Date();
+
+    // Past registration deadline but before start time, still under-filled —
+    // refund early instead of making registered players wait until start
+    // time only to find out it's cancelled.
+    const pastDeadline = await QuizTournament.findAll({
+      where: {
+        status: 'open',
+        registrationDeadline: { [Op.lte]: now },
+        startTime: { [Op.gt]: now }
+      }
+    });
+
+    for (const tournament of pastDeadline) {
+      try {
+        const count = await QuizTournamentParticipant.count({
+          where: { tournamentId: tournament.id, status: 'registered' }
+        });
+        if (count < tournament.minParticipants) {
+          await this.handleInsufficientParticipants(tournament.id, true);
+          console.log(`[TournamentService] Auto-cancelled under-filled tournament ${tournament.id} (${count}/${tournament.minParticipants})`);
+        }
+      } catch (err) {
+        console.error(`[TournamentService] Lifecycle sweep (deadline) failed for ${tournament.id}:`, err.message);
+      }
+    }
+
+    // Past start time and still open — start it, or cancel if it never
+    // filled (covers tournaments with no admin-set registration deadline
+    // gap, or ones that dropped below minParticipants via unregistration
+    // after the deadline check above already ran).
+    const dueToStart = await QuizTournament.findAll({
+      where: { status: 'open', startTime: { [Op.lte]: now } }
+    });
+
+    for (const tournament of dueToStart) {
+      try {
+        const count = await QuizTournamentParticipant.count({
+          where: { tournamentId: tournament.id, status: 'registered' }
+        });
+        if (count >= tournament.minParticipants) {
+          await this.startTournament(tournament.id);
+          console.log(`[TournamentService] Auto-started tournament ${tournament.id} (${count} participants)`);
+        } else {
+          await this.handleInsufficientParticipants(tournament.id, true);
+          console.log(`[TournamentService] Auto-cancelled under-filled tournament ${tournament.id} at start time (${count}/${tournament.minParticipants})`);
+        }
+      } catch (err) {
+        console.error(`[TournamentService] Lifecycle sweep (start) failed for ${tournament.id}:`, err.message);
+      }
+    }
+  }
+
+  /**
+   * Safety net for shared-question-set rounds (classic/speed_run/battle_royale)
+   * where one or more participants went AFK without disconnecting (so no
+   * socket-disconnect forfeit ever fires). Force-submits 'timeout' for any
+   * question they never answered, which naturally drives the round to
+   * completion through the same path a real answer would. Knockout isn't
+   * swept here — its matches already rely on the same client-side 12s
+   * auto-timeout and disconnect-triggered forfeit the 1v1 lobby uses.
+   */
+  async sweepStaleRounds() {
+    const cutoff = new Date(Date.now() - ROUND_MAX_DURATION_MS);
+    const staleRounds = await QuizTournamentRound.findAll({
+      where: { status: 'active', startedAt: { [Op.lt]: cutoff } }
+    });
+
+    for (const round of staleRounds) {
+      try {
+        const tournament = await QuizTournament.findByPk(round.tournamentId);
+        if (!tournament || tournament.format === 'knockout') continue;
+
+        const activeParticipants = await QuizTournamentParticipant.findAll({
+          where: { tournamentId: round.tournamentId, status: 'active' }
+        });
+
+        for (const participant of activeParticipants) {
+          const entry = round.participants.find(p => p.userId === participant.userId);
+          const answeredIds = new Set(entry?.answers || []);
+          const missing = round.questions.filter(qId => !answeredIds.has(qId));
+
+          for (const questionId of missing) {
+            try {
+              await this.submitAnswer(round.tournamentId, round.roundNumber, participant.userId, questionId, 'timeout', Date.now());
+            } catch (err) {
+              // Already answered / round no longer active by the time we got here — non-fatal
+            }
+          }
+        }
+        console.log(`[TournamentService] Swept stale round ${round.id} (tournament ${round.tournamentId}, round ${round.roundNumber})`);
+      } catch (err) {
+        console.error(`[TournamentService] sweepStaleRounds failed for round ${round.id}:`, err.message);
+      }
+    }
   }
 }
 

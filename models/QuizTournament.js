@@ -70,7 +70,7 @@ const QuizTournament = sequelize.define('QuizTournament', {
     field: 'start_time'
   },
   status: {
-    type: DataTypes.ENUM('draft', 'open', 'in_progress', 'completed', 'cancelled'),
+    type: DataTypes.ENUM('draft', 'pending_review', 'open', 'in_progress', 'completed', 'cancelled', 'rejected'),
     allowNull: false,
     defaultValue: 'draft'
   },
@@ -109,6 +109,30 @@ const QuizTournament = sequelize.define('QuizTournament', {
       model: 'Users',
       key: 'id'
     }
+  },
+  completedAt: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    field: 'completed_at'
+  },
+  reviewedBy: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    field: 'reviewed_by',
+    references: {
+      model: 'Users',
+      key: 'id'
+    }
+  },
+  reviewedAt: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    field: 'reviewed_at'
+  },
+  rejectionReason: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    field: 'rejection_reason'
   }
 }, {
   tableName: 'quiz_tournaments',
