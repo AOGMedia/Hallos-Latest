@@ -11,7 +11,17 @@ const quizWalletService = require('./quizWalletService');
 
 const SHARED_QUESTION_FORMATS = ['classic', 'speed_run', 'battle_royale'];
 const QUESTIONS_PER_ROUND = 10;
-const ROUND_MAX_DURATION_MS = (QUESTIONS_PER_ROUND * 15 + 30) * 1000; // 15s/question ceiling + buffer
+
+// Single source of truth for round pacing. QUESTION_TIME_LIMIT_SEC is sent to
+// the client in `round_started`, so the countdown it renders and the window the
+// server scores against can't drift apart. The acceptance ceiling adds the
+// client's post-answer reveal pause plus a latency allowance, because a
+// participant's clock for question N only stops when their answer lands here.
+const QUESTION_TIME_LIMIT_SEC = 10;
+const ANSWER_REVEAL_SEC = 1.5;
+const LATENCY_GRACE_SEC = 2;
+const MAX_ANSWER_ELAPSED_SEC = QUESTION_TIME_LIMIT_SEC + ANSWER_REVEAL_SEC + LATENCY_GRACE_SEC;
+const ROUND_MAX_DURATION_MS = (QUESTIONS_PER_ROUND * MAX_ANSWER_ELAPSED_SEC + 30) * 1000;
 
 /**
  * Emit a socket event to a specific user if connected, or queue it for
@@ -785,6 +795,8 @@ class TournamentService {
       roundNumber: round.roundNumber,
       format: 'knockout',
       matchCount: matches.length,
+      totalQuestions: QUESTIONS_PER_ROUND,
+      timeLimit: QUESTION_TIME_LIMIT_SEC,
       byeUserId
     });
 
@@ -897,6 +909,7 @@ class TournamentService {
         const loserEntry = m.participants.find(p => p.userId !== m.winnerId);
         return loserEntry?.userId;
       }).filter(Boolean);
+      this._assignRoundRanks(updatedEntries);
       round.participants = updatedEntries;
       round.changed('participants', true);
       round.changed('eliminatedUsers', true);
@@ -954,6 +967,8 @@ class TournamentService {
       roundNumber: round.roundNumber,
       format: tournament.format,
       questions: questionsForClient,
+      totalQuestions: questionsForClient.length,
+      timeLimit: QUESTION_TIME_LIMIT_SEC,
       startTime: round.startedAt
     });
   }
@@ -989,22 +1004,37 @@ class TournamentService {
       const question = await questionService_.getQuestionById(questionId, true);
 
       const serverTime = Date.now();
-      const questionStartTime = round.questionStartTimes[questionId];
-      if (!questionStartTime) {
-        round.questionStartTimes[questionId] = serverTime;
-        round.changed('questionStartTimes', true);
-        await round.save({ transaction: t });
-      }
 
-      const elapsed = (serverTime - (questionStartTime || serverTime)) / 1000;
+      // Every participant is paced by their own client, so question N's clock
+      // starts when *their* previous answer landed — not when whoever happened
+      // to answer it first did. A round-wide start stamp meant a participant
+      // trailing the fastest one by more than the ceiling had every remaining
+      // answer coerced to 'timeout', and gave the first submitter of each
+      // question a free elapsed-of-zero (maximum speed bonus). Deriving the
+      // basis from the participant's own answer trail fixes both.
+      const priorAnswer = await QuizTournamentAnswer.findOne({
+        where: { roundId: round.id, userId },
+        order: [['serverTimestamp', 'DESC']],
+        transaction: t
+      });
+      const questionStartTime = priorAnswer
+        ? Number(priorAnswer.serverTimestamp)
+        : new Date(round.startedAt).getTime();
+
+      const elapsed = Math.max((serverTime - questionStartTime) / 1000, 0);
       let finalAnswerId = answerId;
-      if (elapsed > 12 && finalAnswerId.toLowerCase() !== 'timeout') {
+      if (elapsed > MAX_ANSWER_ELAPSED_SEC && finalAnswerId.toLowerCase() !== 'timeout') {
         finalAnswerId = 'timeout';
       }
 
       const clientTimeInt = Math.floor(Number(clientTimestamp));
       const latency = serverTime - clientTimeInt;
-      const adjustedTime = Math.max(elapsed - (latency / 1000), 0);
+      // Clamped at both ends: a skewed client clock or a reconnect flush must
+      // not yield a negative time, nor one longer than the question was open.
+      const adjustedTime = Math.min(
+        Math.max(elapsed - (latency / 1000), 0),
+        QUESTION_TIME_LIMIT_SEC
+      );
 
       const isCorrect = (finalAnswerId.toLowerCase() !== 'timeout') && (question.correctAnswer === finalAnswerId.toLowerCase());
       const lobbyService = require('./lobbyService');
@@ -1055,6 +1085,29 @@ class TournamentService {
     };
   }
 
+  /**
+   * Assign a 1-indexed rank to each round entry — higher score first, faster
+   * completion breaking ties. Mutates the entries in place (they're JSONB rows
+   * the caller is about to persist). Bye entries never played the round, so
+   * they keep a null rank rather than being sorted to the bottom on a zero
+   * score. This is what populates `rank` in the `round_ended` broadcast; it was
+   * previously initialised to null and never written.
+   */
+  _assignRoundRanks(entries) {
+    const played = entries.filter(e => !e.bye);
+    played.sort((a, b) => {
+      if ((b.score || 0) !== (a.score || 0)) return (b.score || 0) - (a.score || 0);
+      const timeA = a.completionTime == null ? Infinity : a.completionTime;
+      const timeB = b.completionTime == null ? Infinity : b.completionTime;
+      return timeA - timeB;
+    });
+    played.forEach((entry, index) => { entry.rank = index + 1; });
+    for (const entry of entries) {
+      if (entry.bye) entry.rank = null;
+    }
+    return entries;
+  }
+
   async _completeSharedQuestionRound(tournamentId, roundNumber) {
     const tournament = await QuizTournament.findByPk(tournamentId);
     if (!tournament) return;
@@ -1081,6 +1134,7 @@ class TournamentService {
           entry.completionTime = null;
         }
       }
+      this._assignRoundRanks(round.participants);
       round.changed('participants', true);
       await round.update({ status: 'completed', completedAt: new Date() }, { transaction: t });
       return false;
@@ -1137,11 +1191,30 @@ class TournamentService {
     const toEliminate = sorted.slice(sorted.length - eliminateCount);
 
     for (const entry of toEliminate) {
-      await QuizTournamentParticipant.update(
+      const [updated] = await QuizTournamentParticipant.update(
         { status: 'eliminated', eliminatedAt: new Date() },
         { where: { tournamentId: tournament.id, userId: entry.userId, status: 'active' } }
       );
+      // Only announce if this call is the one that actually flipped them —
+      // keeps the notice exactly-once if a sweep and a completion race here.
+      if (updated > 0) {
+        this._announceElimination(tournament.id, entry.userId, round.roundNumber, 'bottom_tier');
+      }
     }
+  }
+
+  /**
+   * Tell a participant (and the tournament room) that they're out. Previously
+   * elimination was a silent DB flip, so a knocked-out player sat on the
+   * waiting screen indefinitely with no signal from either channel. Sent to the
+   * room for live standings and directly to the user for durability — the
+   * direct send queues for delivery if they're mid-reconnect, so the client
+   * handler must be idempotent. Mirrors how `tournament_ended` is announced.
+   */
+  _announceElimination(tournamentId, userId, roundNumber, reason) {
+    const payload = { tournamentId, userId, roundNumber, reason };
+    emitToTournamentRoom(tournamentId, 'participant_eliminated', payload);
+    emitToUser(userId, 'participant_eliminated', payload);
   }
 
   /**
@@ -1210,6 +1283,7 @@ class TournamentService {
         status: 'eliminated',
         eliminatedAt: new Date()
       });
+      this._announceElimination(tournamentId, participant.userId, currentRoundNumber, 'did_not_qualify');
     }
 
     // Update tournament current round

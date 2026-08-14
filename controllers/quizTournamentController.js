@@ -322,4 +322,45 @@ exports.getRoundDetail = async (req, res) => {
   }
 };
 
+/**
+ * Submit an answer for a shared-question-set round over REST — the fallback
+ * for when the socket is down, matching POST /lobby/match/:id/answer. Calls
+ * the same service method the `submit_tournament_answer` socket event does, so
+ * timing, scoring and round-completion behave identically on either transport.
+ * Knockout rounds don't come through here; those are real matches and use the
+ * lobby's answer endpoint.
+ * POST /api/quiz/tournament/:id/round/:roundNumber/answer
+ */
+exports.submitRoundAnswer = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { id: tournamentId, roundNumber } = req.params;
+    const { questionId, answerId, clientTimestamp } = req.body;
+
+    if (!questionId || !answerId) {
+      return res.status(400).json({
+        success: false,
+        message: 'questionId and answerId are required'
+      });
+    }
+
+    const result = await tournamentService.submitAnswer(
+      tournamentId,
+      parseInt(roundNumber),
+      userId,
+      questionId,
+      answerId,
+      clientTimestamp || Date.now()
+    );
+
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error('[Quiz Tournament Controller] Submit round answer error:', error);
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Failed to submit answer'
+    });
+  }
+};
+
 module.exports = exports;
