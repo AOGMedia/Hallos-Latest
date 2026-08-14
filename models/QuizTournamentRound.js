@@ -51,7 +51,7 @@ const QuizTournamentRound = sequelize.define('QuizTournamentRound', {
     allowNull: false,
     defaultValue: {},
     field: 'question_start_times',
-    comment: 'Map of questionId to server timestamp — mirrors QuizMatch, used by shared-question-set formats'
+    comment: 'Legacy: retained for historical rows only. Per-question timing is now derived per participant from their own answer trail (see tournamentService.submitAnswer), since a round-wide stamp scored slow participants against the fastest one.'
   },
   status: {
     type: DataTypes.ENUM('pending', 'active', 'completed'),

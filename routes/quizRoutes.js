@@ -78,6 +78,7 @@ const upload = multer({
  * - POST /api/quiz/tournament/:id/unregister - Unregister from tournament
  * - GET /api/quiz/tournament/:id/leaderboard - Get tournament leaderboard
  * - GET /api/quiz/tournament/:id/round/:roundNumber - Round questions/status/standings
+ * - POST /api/quiz/tournament/:id/round/:roundNumber/answer - Submit answer via REST (socket fallback)
  *
  * Leaderboard Routes:
  * - GET /api/quiz/leaderboard/global - Get global leaderboard
@@ -318,6 +319,13 @@ router.get('/tournament/:id/leaderboard', authMiddleware, quizTournamentControll
  * @access  Private
  */
 router.get('/tournament/:id/round/:roundNumber', authMiddleware, quizTournamentController.getRoundDetail);
+
+/**
+ * @route   POST /api/quiz/tournament/:id/round/:roundNumber/answer
+ * @desc    Submit a round answer via REST (fallback when socket is down)
+ * @access  Private
+ */
+router.post('/tournament/:id/round/:roundNumber/answer', authMiddleware, quizRateLimiter.answerSubmission(), quizTournamentController.submitRoundAnswer);
 
 // ==================== LEADERBOARD ROUTES ====================
 
