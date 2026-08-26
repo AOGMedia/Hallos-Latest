@@ -37,6 +37,7 @@ const adminCouponRoutes = require('./routes/adminCouponRoutes');
 const communityRoutes = require('./routes/communityRoutes');
 const adminCommunityRoutes = require('./routes/adminCommunityRoutes');
 const campaignRoutes = require('./routes/campaignRoutes');
+const blogRoutes = require('./routes/blogRoutes');
 const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
@@ -57,6 +58,7 @@ require('./models/quizIndex');
 require('./models/freebieIndex');
 require('./models/couponIndex');
 require('./models/communityIndex');
+require('./models/chatIndex');
 
 const app = express();
 
@@ -178,6 +180,7 @@ app.use('/api/admin/coupons', adminCouponRoutes);
 app.use('/api/communities', communityRoutes);
 app.use('/api/admin/communities', adminCommunityRoutes);
 app.use('/api/campaigns', campaignRoutes);
+app.use('/api/blog', blogRoutes);
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/uploads', express.static('uploads'));
 

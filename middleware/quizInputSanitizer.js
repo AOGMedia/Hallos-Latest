@@ -314,6 +314,25 @@ class QuizInputSanitizer {
       errors
     };
   }
+
+  /**
+   * Validate a chat message send
+   */
+  validateChatMessageInput(data) {
+    const errors = [];
+
+    const body = typeof data.body === 'string' ? data.body.trim() : '';
+    if (!body) {
+      errors.push('Message body cannot be empty');
+    } else if (body.length > 2000) {
+      errors.push('Message body exceeds 2000 character limit');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
 }
 
 const quizInputSanitizer = new QuizInputSanitizer();

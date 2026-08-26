@@ -263,8 +263,44 @@ class QuizRateLimiter {
   }
 
   /**
+   * Rate limit chat message sends (REST fallback path)
+   * 30 per minute per user
+   */
+  chatMessage() {
+    return async (req, res, next) => {
+      const userId = req.user?.id;
+
+      if (!userId) {
+        return res.status(401).json({
+          success: false,
+          message: 'Authentication required'
+        });
+      }
+
+      const key = `quiz:ratelimit:chat:${userId}`;
+      const result = await this.checkLimit(key, 30, 60); // 30 per minute
+
+      res.setHeader('X-RateLimit-Limit', '30');
+      res.setHeader('X-RateLimit-Remaining', result.remaining.toString());
+      res.setHeader('X-RateLimit-Reset', result.resetAt.toString());
+
+      if (!result.allowed) {
+        res.setHeader('Retry-After', result.retryAfter.toString());
+
+        return res.status(429).json({
+          success: false,
+          message: 'Too many messages sent. Please slow down.',
+          retryAfter: result.retryAfter
+        });
+      }
+
+      next();
+    };
+  }
+
+  /**
    * Get rate limit status for a user
-   * 
+   *
    * @param {number} userId - User ID
    * @param {string} type - Rate limit type ('answer', 'challenge', 'api', 'tournament')
    * @returns {Promise<Object>} Rate limit status
