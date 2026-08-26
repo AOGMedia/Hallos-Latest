@@ -130,6 +130,7 @@ class WebSocketManager {
     this.registerTournamentEvents(socket);
     this.registerHeartbeatEvents(socket);
     this.registerActiveUserEvents(socket);
+    this.registerChatEvents(socket);
 
     // Check for active matches in DB to handle full page reloads/new sessions
     this.resyncActiveMatch(socket, userId);
@@ -222,6 +223,7 @@ class WebSocketManager {
     this.registerTournamentEvents(socket);
     this.registerHeartbeatEvents(socket);
     this.registerActiveUserEvents(socket);
+    this.registerChatEvents(socket);
 
     // Handle disconnection
     socket.on('disconnect', () => {
@@ -520,6 +522,78 @@ class WebSocketManager {
         socket.emit('error', {
           code: 'ONLINE_PLAYERS_ERROR',
           message: 'Failed to get online players'
+        });
+      }
+    });
+  }
+
+  /**
+   * Register 1:1 chat events. Delivery is direct sendOrQueue() to the
+   * recipient's userId, never a room — a conversation only ever has two
+   * participants, so there's nothing a room buys here that userId-keyed
+   * delivery doesn't already give for free, and it avoids needing a
+   * "rejoin N conversation rooms" step on reconnect.
+   */
+  registerChatEvents(socket) {
+    const userId = socket.userId;
+
+    socket.on('send_chat_message', async (data) => {
+      try {
+        const { conversationId, body } = data || {};
+
+        const quizInputSanitizer = require('../middleware/quizInputSanitizer');
+        const validation = quizInputSanitizer.validateChatMessageInput({ body });
+        if (!validation.valid) {
+          socket.emit('error', {
+            code: 'INVALID_CHAT_MESSAGE',
+            message: validation.errors.join(', ')
+          });
+          return;
+        }
+
+        const limitRes = await quizRateLimiter.checkLimit(`quiz:ratelimit:chat:${userId}`, 30, 60);
+        if (!limitRes.allowed) {
+          socket.emit('error', {
+            code: 'RATE_LIMIT_EXCEEDED',
+            message: 'Too many messages sent. Please slow down.',
+            retryAfter: limitRes.retryAfter
+          });
+          return;
+        }
+
+        const sanitizedBody = quizInputSanitizer.sanitizeString(body);
+        const chatService = require('./chatService');
+        const message = await chatService.sendMessage(conversationId, userId, sanitizedBody);
+
+        // Ack to the sender
+        socket.emit('chat_message_sent', {
+          conversationId,
+          messageId: message.id,
+          createdAt: message.createdAt
+        });
+
+        // Push to the recipient — durable persistence already happened
+        // above, this is purely a "wake up" notification if they're online.
+        this.sendOrQueue(message.recipientId, 'chat_message', {
+          conversationId,
+          message: {
+            id: message.id,
+            senderId: userId,
+            body: sanitizedBody,
+            createdAt: message.createdAt
+          }
+        });
+
+        // Lightweight badge nudge, separate from the full message payload
+        this.sendOrQueue(message.recipientId, 'chat_unread_update', {
+          conversationId,
+          delta: 1
+        });
+      } catch (error) {
+        console.error('[WebSocket] Send chat message error:', error);
+        socket.emit('error', {
+          code: 'SEND_CHAT_MESSAGE_ERROR',
+          message: error.message
         });
       }
     });

@@ -69,6 +69,15 @@ const upload = multer({
  * - GET /api/quiz/invite/mine - List invites sent + their status
  * - POST /api/quiz/invite/:id/revoke - Cancel an outstanding invite
  *
+ * Chat Routes (1:1 messaging, scoped to prior contact — opponent or invite link):
+ * - GET /api/quiz/chat/contacts/:userId/check - Check prior-contact status
+ * - GET /api/quiz/chat/conversations - List my conversations
+ * - GET /api/quiz/chat/conversations/with/:userId - Get or create a conversation
+ * - GET /api/quiz/chat/conversations/:conversationId/messages - Paginated message history
+ * - POST /api/quiz/chat/conversations/:conversationId/messages - Send via REST (socket fallback)
+ * - POST /api/quiz/chat/conversations/:conversationId/read - Mark unread messages read
+ * - GET /api/quiz/chat/unread-count - Total unread count for the sidebar badge
+ *
  * Tournament Routes:
  * - GET /api/quiz/tournaments - List tournaments (open/in_progress/completed/cancelled only)
  * - POST /api/quiz/tournament/propose - Propose a user-hosted tournament (pending_review until approved)
@@ -751,6 +760,102 @@ router.get(
   '/invite/share-links',
   authMiddleware,
   quizInviteController.getShareLinks
+);
+
+// ==================== CHAT ROUTES ====================
+// 1:1 messaging scoped to prior contact — an opponent from any QuizMatch
+// (any status), or someone linked via a QuizInvite/QuizInviteClaim either
+// way. See services/chatService.js#areContacts for the exact rule.
+
+const chatController = require('../controllers/chatController');
+
+/**
+ * @route   GET /api/quiz/chat/contacts/:userId/check
+ * @desc    Check whether the current user and :userId have prior contact —
+ *          gates the "Message" button client-side before attempting to
+ *          open a conversation.
+ * @access  Private
+ */
+router.get(
+  '/chat/contacts/:userId/check',
+  authMiddleware,
+  chatController.checkContact
+);
+
+/**
+ * @route   GET /api/quiz/chat/conversations
+ * @desc    List the current user's conversations, newest activity first,
+ *          each enriched with the other participant's quiz identity and
+ *          unread count.
+ * @access  Private
+ * @query   page, limit
+ */
+router.get(
+  '/chat/conversations',
+  authMiddleware,
+  chatController.listConversations
+);
+
+/**
+ * @route   GET /api/quiz/chat/conversations/with/:userId
+ * @desc    Get or create the conversation with :userId. 403 if the two
+ *          users have no prior contact.
+ * @access  Private
+ */
+router.get(
+  '/chat/conversations/with/:userId',
+  authMiddleware,
+  chatController.getOrCreateConversation
+);
+
+/**
+ * @route   GET /api/quiz/chat/conversations/:conversationId/messages
+ * @desc    Paginated message history, newest-first. 403 if the requester
+ *          isn't a participant in the conversation.
+ * @access  Private
+ * @query   page, limit
+ */
+router.get(
+  '/chat/conversations/:conversationId/messages',
+  authMiddleware,
+  chatController.listMessages
+);
+
+/**
+ * @route   POST /api/quiz/chat/conversations/:conversationId/messages
+ * @desc    Send a message via REST — fallback for when the socket is down,
+ *          mirroring POST /lobby/match/:id/answer's role for answers.
+ * @access  Private
+ * @body    { body }
+ */
+router.post(
+  '/chat/conversations/:conversationId/messages',
+  authMiddleware,
+  quizRateLimiter.chatMessage(),
+  chatController.sendMessage
+);
+
+/**
+ * @route   POST /api/quiz/chat/conversations/:conversationId/read
+ * @desc    Mark the current user's unread messages in this conversation as read
+ * @access  Private
+ */
+router.post(
+  '/chat/conversations/:conversationId/read',
+  authMiddleware,
+  chatController.markConversationRead
+);
+
+/**
+ * @route   GET /api/quiz/chat/unread-count
+ * @desc    Total unread message count across all conversations, for the
+ *          sidebar badge.
+ * @access  Private
+ */
+router.get(
+  '/chat/unread-count',
+  authMiddleware,
+  chatController.getUnreadCount
 );
 
 // ==================== ERROR HANDLER ====================

@@ -58,6 +58,7 @@ require('./models/quizIndex');
 require('./models/freebieIndex');
 require('./models/couponIndex');
 require('./models/communityIndex');
+require('./models/chatIndex');
 
 const app = express();
 
