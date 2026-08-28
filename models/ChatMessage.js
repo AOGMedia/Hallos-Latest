@@ -51,7 +51,11 @@ const ChatMessage = sequelize.define('ChatMessage', {
 }, {
   tableName: 'chat_messages',
   underscored: true,
-  createdAt: 'created_at',
+  // NB: do not add `createdAt: 'created_at'` here. That renames the *attribute*
+  // to `created_at`, so `createdAt` stops existing and any
+  // `order: [['createdAt', ...]]` leaks through as a raw column reference —
+  // "column ChatMessage.createdAt does not exist". `underscored: true` already
+  // maps the `createdAt` attribute to the `created_at` column.
   updatedAt: false
 });
 
