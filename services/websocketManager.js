@@ -561,7 +561,9 @@ class WebSocketManager {
           return;
         }
 
-        const sanitizedBody = quizInputSanitizer.sanitizeString(body);
+        // Strips markup rather than entity-encoding punctuation — sanitizeString
+        // would turn "it's" into "it&#x27;s" in the stored message.
+        const sanitizedBody = quizInputSanitizer.sanitizeChatMessage(body);
         const chatService = require('./chatService');
         const message = await chatService.sendMessage(conversationId, userId, sanitizedBody);
 

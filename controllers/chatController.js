@@ -127,14 +127,17 @@ exports.sendMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: validation.errors.join(', ') });
     }
 
-    const sanitizedBody = quizInputSanitizer.sanitizeString(body);
+    // quizRoutes.js skips its global entity-escaping sanitizer for this one
+    // route (see the note there), so `body` arrives as the user typed it.
+    // sanitizeChatMessage strips markup instead of encoding punctuation.
+    const sanitizedBody = quizInputSanitizer.sanitizeChatMessage(body);
     const message = await chatService.sendMessage(conversationId, myUserId, sanitizedBody);
 
     try {
       const websocketManager = require('../services/websocketManager');
       websocketManager.sendOrQueue(message.recipientId, 'chat_message', {
         conversationId,
-        message: { id: message.id, senderId: myUserId, body: sanitizedBody, createdAt: message.createdAt }
+        message: { id: message.id, senderId: myUserId, body: message.body, createdAt: message.createdAt }
       });
       websocketManager.sendOrQueue(message.recipientId, 'chat_unread_update', { conversationId, delta: 1 });
     } catch (wsError) {
@@ -143,7 +146,7 @@ exports.sendMessage = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: { id: message.id, senderId: myUserId, body: sanitizedBody, createdAt: message.createdAt }
+      message: { id: message.id, senderId: myUserId, body: message.body, createdAt: message.createdAt }
     });
   } catch (error) {
     console.error('[Chat Controller] Send message error:', error);

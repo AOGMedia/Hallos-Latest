@@ -116,6 +116,16 @@ const upload = multer({
 // ==================== GLOBAL MIDDLEWARE ====================
 // Apply input sanitization to all quiz routes except file uploads
 router.use((req, res, next) => {
+  // Skip the entity-escaping sanitizer for chat message sends. It escapes all
+  // strings with validator.escape(), which corrupts ordinary free text — an
+  // apostrophe is stored as "&#x27;" and renders literally in the thread.
+  // chatController applies quizInputSanitizer.sanitizeChatMessage() instead,
+  // which strips markup rather than encoding punctuation; React escapes on
+  // render as the actual XSS boundary.
+  if (req.method === 'POST' && /^\/chat\/conversations\/[^/]+\/messages\/?$/.test(req.path)) {
+    return next();
+  }
+
   // Skip sanitizer for multipart/form-data (file uploads) — multer handles those
   if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
     return next();

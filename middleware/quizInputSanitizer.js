@@ -316,6 +316,45 @@ class QuizInputSanitizer {
   }
 
   /**
+   * Sanitize a free-text chat message.
+   *
+   * Deliberately does NOT use validator.escape(). Entity-encoding on input
+   * corrupts ordinary punctuation for every downstream consumer ("it's" gets
+   * stored as "it&#x27;s" and then renders literally), and HTML-escaping is an
+   * output concern — the chat UI renders through React, which escapes text on
+   * render by design.
+   *
+   * Defence on the way in is therefore removal rather than encoding: anything
+   * shaped like a tag is stripped outright, so a <script> payload can't be
+   * stored at all, while ordinary text survives untouched.
+   */
+  sanitizeChatMessage(input) {
+    if (typeof input !== 'string') {
+      return '';
+    }
+
+    // Strip anything shaped like a tag. Bare angle brackets are deliberately
+    // left alone — they're common in ordinary messages ("2 < 4", "> quoted")
+    // and can't form markup on their own; React escapes whatever reaches the
+    // DOM, so it is the actual XSS boundary.
+    let out = input.replace(/<[^>]*>/g, '');
+
+    // Drop control characters, keeping tab (9) and newline (10). Done by
+    // char code rather than a control-character regex to keep this file free
+    // of literal control bytes.
+    out = out
+      .split('')
+      .filter((ch) => {
+        const code = ch.charCodeAt(0);
+        return code === 9 || code === 10 || (code >= 32 && code !== 127);
+      })
+      .join('');
+
+    // Collapse runs of blank lines, then trim.
+    return out.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  /**
    * Validate a chat message send
    */
   validateChatMessageInput(data) {
