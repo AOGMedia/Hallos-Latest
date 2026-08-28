@@ -65,11 +65,17 @@ exports.getTournament = async (req, res) => {
                                tournament.status === 'completed' ||
                                new Date(tournament.startTime) <= now;
 
-    let participants = tournament.participants || [];
-    
+    const allParticipants = tournament.participants || [];
+    // Count from the full list BEFORE privacy filtering — blanking the array
+    // for privacy must not also zero out the count, or the detail screen
+    // disagrees with the tournament card (which counts server-side).
+    const participantCount = allParticipants.length;
+
+    let participants = allParticipants;
+
     // If tournament hasn't started and user is not admin, hide participant list
     if (!tournamentStarted && !isAdmin) {
-      participants = []; // Hide participant list
+      participants = []; // Hide participant list (count above is unaffected)
     }
 
     const QuizCategory = require('../models/QuizCategory');
@@ -82,12 +88,15 @@ exports.getTournament = async (req, res) => {
       tournament: {
         ...tournament.toJSON(),
         categoryName: category?.name || null,
-        currentParticipants: tournament.participants ? tournament.participants.length : 0,
+        currentParticipants: participantCount,
         participants // May be empty array if hidden
       },
-      participantCount: tournament.participants ? tournament.participants.length : 0,
+      participantCount,
       prizePool: tournament.prizePool,
-      participantsHidden: !tournamentStarted && !isAdmin
+      participantsHidden: !tournamentStarted && !isAdmin,
+      // Explicit, because the participants array is blanked for privacy before
+      // the tournament starts — the client can't derive this itself.
+      isRegistered: allParticipants.some((p) => Number(p.userId) === Number(userId))
     });
   } catch (error) {
     console.error('[Quiz Tournament Controller] Get tournament error:', error);
