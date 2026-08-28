@@ -46,9 +46,10 @@ const ChatConversation = sequelize.define('ChatConversation', {
   }
 }, {
   tableName: 'chat_conversations',
-  underscored: true,
-  createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  // `underscored: true` already maps createdAt/updatedAt to the
+  // created_at/updated_at columns — see the note in ChatMessage.js for why
+  // explicitly setting `createdAt: 'created_at'` breaks ordering.
+  underscored: true
 });
 
 ChatConversation.associate = (models) => {
