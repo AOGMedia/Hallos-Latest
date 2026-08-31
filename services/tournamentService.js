@@ -76,6 +76,15 @@ function shuffle(array) {
  */
 
 const VALID_TOURNAMENT_FORMATS = ['speed_run', 'classic', 'knockout', 'battle_royale'];
+// Rounds for knockout/battle_royale are mathematically derived from the final
+// registered headcount at start time (a bracket size isn't a free choice).
+// classic/speed_run have no elimination mechanic to derive a round count
+// from, so unlike the other two, an organizer configures it directly — same
+// as they already do for entryFee, participant caps, and prize split.
+const CONFIGURABLE_ROUNDS_FORMATS = ['classic', 'speed_run'];
+const DEFAULT_TOURNAMENT_ROUNDS = 3;
+const MIN_TOURNAMENT_ROUNDS = 1;
+const MAX_TOURNAMENT_ROUNDS = 10;
 
 class TournamentService {
   /**
@@ -94,7 +103,8 @@ class TournamentService {
       maxParticipants,
       minParticipants = 2,
       registrationDeadline,
-      startTime
+      startTime,
+      totalRounds
     } = config;
 
     if (!name || !format || entryFee === undefined || !categoryId || !registrationDeadline || !startTime) {
@@ -131,6 +141,23 @@ class TournamentService {
       throw new Error('Prize distribution must sum to 100%');
     }
 
+    // Only classic/speed_run take a configured round count — knockout and
+    // battle_royale compute theirs from the final registered headcount when
+    // the tournament starts (see startTournament), so any totalRounds
+    // submitted for those two formats is intentionally ignored rather than
+    // stored, to avoid a stale/meaningless value sitting on the row before
+    // start time overwrites it anyway.
+    let finalTotalRounds;
+    if (CONFIGURABLE_ROUNDS_FORMATS.includes(format)) {
+      finalTotalRounds = totalRounds === undefined || totalRounds === null
+        ? DEFAULT_TOURNAMENT_ROUNDS
+        : parseInt(totalRounds, 10);
+
+      if (!Number.isInteger(finalTotalRounds) || finalTotalRounds < MIN_TOURNAMENT_ROUNDS || finalTotalRounds > MAX_TOURNAMENT_ROUNDS) {
+        throw new Error(`totalRounds must be an integer between ${MIN_TOURNAMENT_ROUNDS} and ${MAX_TOURNAMENT_ROUNDS}`);
+      }
+    }
+
     return {
       name,
       description,
@@ -141,7 +168,8 @@ class TournamentService {
       maxParticipants,
       minParticipants,
       registrationDeadline: regDeadline,
-      startTime: tournamentStart
+      startTime: tournamentStart,
+      ...(finalTotalRounds !== undefined && { totalRounds: finalTotalRounds })
     };
   }
 
@@ -593,15 +621,30 @@ class TournamentService {
         throw new Error(`Insufficient participants. Need ${tournament.minParticipants}, have ${count}`);
       }
 
-      // Calculate total rounds based on format
-      let rounds = 1;
+      // Calculate total rounds based on format. classic/speed_run already
+      // have an organizer-configured value from creation time (see
+      // _validateTournamentConfig) — preserve it rather than resetting to 1;
+      // the fallback only matters for rows created before this existed.
+      // knockout/battle_royale always overwrite this below regardless, since
+      // their round count can only be known once the final headcount is in.
+      let rounds = tournament.totalRounds || DEFAULT_TOURNAMENT_ROUNDS;
       if (tournament.format === 'knockout') {
         rounds = Math.ceil(Math.log2(count));
       } else if (tournament.format === 'battle_royale') {
+        // Keep 75%, eliminate 25% per round — but `Math.ceil(3 * 0.75)` is 3,
+        // a fixed point of the raw recurrence: once the field reached exactly
+        // 3 it never shrank again, and this loop spun forever. Since it runs
+        // synchronously inside this transaction's row lock with no `await`,
+        // that wasn't just one stuck tournament — it froze the entire Node
+        // event loop, and the lifecycle-sweep cron auto-starts any due
+        // tournament with enough registrants, so any battle_royale tournament
+        // with 3+ participants reaching its start time took the whole backend
+        // down. `Math.min(remaining - 1, ...)` guarantees the field strictly
+        // shrinks by at least 1 every iteration, so it always reaches 2.
         let remaining = count;
         rounds = 0;
         while (remaining > 2) {
-          remaining = Math.ceil(remaining * 0.75); // Keep 75%, eliminate 25%
+          remaining = Math.max(2, Math.min(remaining - 1, Math.ceil(remaining * 0.75)));
           rounds++;
         }
         rounds++; // Final round
@@ -905,6 +948,32 @@ class TournamentService {
         return { ...entry, score: mp?.score ?? 0, completionTime: mp?.completionTime ?? null };
       });
 
+      // Sync each entrant's real match score onto QuizTournamentParticipant.totalScore
+      // — the field the per-tournament leaderboard (getTournamentLeaderboard)
+      // and _rankParticipants' tiebreak both read. Knockout had no write site
+      // for this at all: the only other write, in _completeSharedQuestionRound,
+      // runs exclusively for the shared-question formats (classic/speed_run/
+      // battle_royale). Without this, every knockout entrant's leaderboard
+      // score stayed permanently 0 regardless of how they actually played.
+      // Both the winner and the loser of this round are updated here —
+      // elimination (advanceToNextRound, called later via
+      // _finishRoundAndContinue) hasn't run yet at this point, so both are
+      // still 'active'; totalScore is also what breaks a tie between two
+      // players eliminated in the same round, so the loser's score matters too.
+      for (const entry of updatedEntries) {
+        if (entry.bye) continue;
+        const participant = await QuizTournamentParticipant.findOne({
+          where: { tournamentId: match.tournamentId, userId: entry.userId },
+          transaction: t,
+          lock: t.LOCK.UPDATE
+        });
+        if (!participant || participant.status !== 'active') continue;
+        await participant.update(
+          { totalScore: (participant.totalScore || 0) + (entry.score || 0) },
+          { transaction: t }
+        );
+      }
+
       round.eliminatedUsers = roundMatches.map(m => {
         const loserEntry = m.participants.find(p => p.userId !== m.winnerId);
         return loserEntry?.userId;
@@ -1187,7 +1256,13 @@ class TournamentService {
     if (activeEntries.length <= 2) return; // don't eliminate below the final showdown
 
     const sorted = [...activeEntries].sort((a, b) => (b.score || 0) - (a.score || 0));
-    const eliminateCount = Math.max(0, Math.min(sorted.length - 2, Math.floor(sorted.length * 0.25)));
+    // Same fixed-point problem as startTournament's round-count math: once the
+    // field narrows to exactly 3, `Math.floor(3 * 0.25)` is 0, so elimination
+    // silently stopped forever short of the "final showdown" the comment
+    // above promises. The guard above guarantees sorted.length > 2 here, so
+    // Math.min(sorted.length - 2, ...) is always >= 1 — forcing a minimum of
+    // 1 elimination per round guarantees the field keeps shrinking toward 2.
+    const eliminateCount = Math.max(1, Math.min(sorted.length - 2, Math.floor(sorted.length * 0.25)));
     const toEliminate = sorted.slice(sorted.length - eliminateCount);
 
     for (const entry of toEliminate) {
@@ -1468,6 +1543,27 @@ class TournamentService {
       });
     }
 
+    // Every OTHER participant of this now-completed tournament still needs
+    // tournamentsEntered incremented — updateUserTournamentStats above only
+    // ever runs for the top 3. Before this, the global tournament leaderboard
+    // (leaderboardService.getTournamentLeaderboard, filtered on
+    // `tournamentsEntered > 0`) permanently excluded every 4th-place-or-lower
+    // finisher, forever, no matter how many tournaments they played — the
+    // field's only write site was gated on a placement condition its own name
+    // says nothing about. `allParticipants` is exactly "everyone who
+    // registered and didn't unregister before the tournament started" —
+    // unregistering (the only place a participant row is ever deleted) is
+    // only permitted while the tournament is still 'open', so by the time
+    // this method runs every remaining row genuinely entered and saw it
+    // through. This intentionally updates ONLY tournamentsEntered, not
+    // tournamentsWon/top3Finishes/prize fields — those remain placement-only,
+    // exactly as they already correctly are.
+    const rankedUserIds = new Set(ranked.map(p => p.userId));
+    for (const participant of allParticipants) {
+      if (rankedUserIds.has(participant.userId)) continue; // already handled above
+      await this._incrementTournamentsEntered(participant.userId);
+    }
+
     try {
       require('./websocketManager').broadcastTournamentEnded(tournamentId, {
         winnerId: ranked[0]?.userId || null,
@@ -1503,6 +1599,30 @@ class TournamentService {
     tournamentStats.totalPrizeMoney = (tournamentStats.totalPrizeMoney || 0) + prizeWon;
     tournamentStats.totalEntryFees = (tournamentStats.totalEntryFees || 0) + tournament.entryFee;
     tournamentStats.netProfit = (tournamentStats.totalPrizeMoney || 0) - (tournamentStats.totalEntryFees || 0);
+
+    await stats.update({
+      tournamentStats,
+      lastTournamentAt: new Date()
+    });
+  }
+
+  /**
+   * Increment only tournamentsEntered, for a participant of a just-completed
+   * tournament who did not place top 3. Kept separate from
+   * updateUserTournamentStats (rather than calling it with a null placement)
+   * so a non-placer's update carries none of the placement-specific side
+   * effects — tournamentsWon, top3Finishes, and the prize/entry-fee/netProfit
+   * fields stay exactly as accurate as they already are for top-3 finishers,
+   * untouched by this.
+   */
+  async _incrementTournamentsEntered(userId) {
+    const [stats] = await UserQuizStats.findOrCreate({
+      where: { userId },
+      defaults: { userId }
+    });
+
+    const tournamentStats = stats.tournamentStats || {};
+    tournamentStats.tournamentsEntered = (tournamentStats.tournamentsEntered || 0) + 1;
 
     await stats.update({
       tournamentStats,

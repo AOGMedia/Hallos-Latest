@@ -65,7 +65,28 @@ exports.getTournament = async (req, res) => {
                                tournament.status === 'completed' ||
                                new Date(tournament.startTime) <= now;
 
-    const allParticipants = tournament.participants || [];
+    // Enrich each participant with their quiz identity — QuizTournamentParticipant
+    // only stores userId, so without this every entrant rendered as
+    // "Player <userId>" on the client instead of their real nickname/avatar.
+    // The knockout challenge_accepted payload and the tournament leaderboard
+    // already do this same lookup; this endpoint was the one place that didn't.
+    const UserQuizStats = require('../models/UserQuizStats');
+    const rawParticipants = tournament.participants || [];
+    const statsRows = rawParticipants.length > 0
+      ? await UserQuizStats.findAll({
+          where: { userId: rawParticipants.map((p) => p.userId) },
+          attributes: ['userId', 'nickname', 'avatarUrl']
+        })
+      : [];
+    const statsByUserId = {};
+    statsRows.forEach((s) => { statsByUserId[s.userId] = s; });
+
+    const allParticipants = rawParticipants.map((p) => ({
+      ...p.toJSON(),
+      nickname: statsByUserId[p.userId]?.nickname || `Player_${p.userId}`,
+      avatarUrl: statsByUserId[p.userId]?.avatarUrl || null
+    }));
+
     // Count from the full list BEFORE privacy filtering — blanking the array
     // for privacy must not also zero out the count, or the detail screen
     // disagrees with the tournament card (which counts server-side).
