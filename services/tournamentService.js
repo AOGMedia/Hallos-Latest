@@ -1995,12 +1995,17 @@ class TournamentService {
 
     if (match) {
       const payload = await require('./lobbyService').buildChallengeAcceptPayload(match, userId);
-      return {
-        type: 'knockout_match',
-        tournamentId: match.tournamentId,
-        roundNumber: match.roundNumber,
-        ...payload
-      };
+      // Null means the match has no real opponent to play against, so there's
+      // nothing joinable to advertise — spreading it would yield a
+      // knockout_match with no matchId and send the "Join Now" banner nowhere.
+      if (payload) {
+        return {
+          type: 'knockout_match',
+          tournamentId: match.tournamentId,
+          roundNumber: match.roundNumber,
+          ...payload
+        };
+      }
     }
 
     const participant = await QuizTournamentParticipant.findOne({
