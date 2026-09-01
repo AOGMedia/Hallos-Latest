@@ -49,6 +49,12 @@ class LobbyService {
    */
   /**
    * Emit a socket event to a specific user if they are connected
+   *
+   * Fire-and-forget by design: if the user has no live socket the event is
+   * dropped. That's correct for transient notices whose value expires with the
+   * moment (declines, cancellations, timeouts) — replaying those on a later
+   * reconnect would surface stale popups for challenges already resolved.
+   * For anything the recipient must not miss, use _emitToUserDurable instead.
    */
   _emitToUser(userId, event, payload) {
     try {
@@ -62,6 +68,28 @@ class LobbyService {
       }
     } catch (e) {
       console.error(`[LobbyService] Failed to emit '${event}' to user ${userId}:`, e.message);
+    }
+  }
+
+  /**
+   * Emit a socket event to a specific user, queueing it for replay on
+   * reconnect if they aren't currently connected.
+   *
+   * Lobby "online" status is Redis-backed (activeUserTracker) and is a
+   * different source of truth from the live socket map, so a user can be
+   * listed as challengeable while momentarily holding no socket — mid
+   * reconnect, backgrounded on mobile, or briefly dropped. Delivering the
+   * inbound challenge with the fire-and-forget path meant the notification was
+   * logged and discarded in exactly that window, and since nothing polls for
+   * pending challenges over REST, the challenge was then unreachable until it
+   * expired and refunded ~60s later. sendOrQueue is the same primitive
+   * challenge_accepted / opponent_progress / match_ended already use.
+   */
+  _emitToUserDurable(userId, event, payload) {
+    try {
+      require('./websocketManager').sendOrQueue(Number(userId), event, payload);
+    } catch (e) {
+      console.error(`[LobbyService] Failed to queue '${event}' for user ${userId}:`, e.message);
     }
   }
 
@@ -160,7 +188,7 @@ class LobbyService {
         UserQuizStats.findOne({ where: { userId }, attributes: ['userId', 'nickname', 'avatarUrl', 'lobbyStats'] }),
         match.categoryId ? QuizCategory.findByPk(match.categoryId, { attributes: ['name'] }) : null
       ]);
-      this._emitToUser(opponentId, 'challenge_received', {
+      this._emitToUserDurable(opponentId, 'challenge_received', {
         challengeId: match.id,
         challenger: {
           userId,
@@ -1092,15 +1120,23 @@ class LobbyService {
       }
     }
 
-    // Determine the opponent (the participant who is NOT the current user)
+    // Determine the opponent (the participant who is NOT the current user).
+    // A match with no second participant is not playable — it means the
+    // opponent slot was never filled. Returning a synthetic
+    // `{ userId: 0, nickname: 'Opponent' }` here (as this used to) dropped the
+    // player into a real game against a user that cannot exist, so no answer
+    // could ever arrive from "them" and the match hung until the AFK/forfeit
+    // sweep resolved it. Refuse instead, and let callers decide what to do.
     const opponentId = match.participants.find(p => p.userId !== userId)?.userId;
-    let opponentStats = null;
-    if (opponentId) {
-      opponentStats = await UserQuizStats.findOne({
-        where: { userId: opponentId },
-        attributes: ['userId', 'nickname', 'avatarUrl']
-      });
+    if (!opponentId) {
+      console.warn(`[LobbyService] Match ${match.id} has no opponent for user ${userId} — refusing to build a playable payload`);
+      return null;
     }
+
+    const opponentStats = await UserQuizStats.findOne({
+      where: { userId: opponentId },
+      attributes: ['userId', 'nickname', 'avatarUrl']
+    });
 
     return {
       matchId: match.id,
@@ -1108,11 +1144,13 @@ class LobbyService {
       challengerId: match.challengerId, // <-- CRITICAL FIX: Frontend needs this to assign scores!
       startTime: match.startedAt || new Date(),
       questions: questionsForClient,
-      opponent: opponentStats ? {
-        userId: opponentStats.userId,
-        nickname: opponentStats.nickname,
-        avatarUrl: opponentStats.avatarUrl
-      } : { userId: 0, nickname: 'Opponent', avatarUrl: null }
+      // A real opponent with no UserQuizStats row yet is still a real
+      // opponent — fall back on their display name only, never their identity.
+      opponent: {
+        userId: opponentId,
+        nickname: opponentStats?.nickname || `Player_${opponentId}`,
+        avatarUrl: opponentStats?.avatarUrl || null
+      }
     };
   }
 
