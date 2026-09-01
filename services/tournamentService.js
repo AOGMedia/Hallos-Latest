@@ -23,6 +23,22 @@ const LATENCY_GRACE_SEC = 2;
 const MAX_ANSWER_ELAPSED_SEC = QUESTION_TIME_LIMIT_SEC + ANSWER_REVEAL_SEC + LATENCY_GRACE_SEC;
 const ROUND_MAX_DURATION_MS = (QUESTIONS_PER_ROUND * MAX_ANSWER_ELAPSED_SEC + 30) * 1000;
 
+// Knockout matches have no accept/decline step and no per-participant expiry,
+// so a no-show opponent leaves the match 'active' forever, which blocks the
+// entire round (round-advance requires every match to reach 'completed').
+// These sweeps give the match a real deadline instead.
+const KNOCKOUT_NO_SHOW_GRACE_MS = 3 * 60 * 1000;
+const KNOCKOUT_BOTH_ABSENT_GRACE_MS = 6 * 60 * 1000;
+
+// Guards against startTournament() committing status:'in_progress' and then
+// executeRound(id, 1) throwing before round 1 is ever created, which would
+// otherwise leave the tournament permanently stuck with no automatic retry.
+const STUCK_START_GRACE_MS = 2 * 60 * 1000;
+
+// Discovery endpoint only surfaces a knockout match started within this
+// window — mirrors lobbyService.getActiveMatchForUser's own cutoff.
+const ACTIVE_MATCH_LOOKBACK_MS = 30 * 60 * 1000;
+
 /**
  * Emit a socket event to a specific user if connected, or queue it for
  * delivery on reconnect. Mirrors lobbyService's `_emitToUser`/`sendOrQueue`
@@ -1839,6 +1855,167 @@ class TournamentService {
         console.error(`[TournamentService] sweepStaleRounds failed for round ${round.id}:`, err.message);
       }
     }
+  }
+
+  /**
+   * Safety net for knockout matches with a silent opponent. Knockout matches
+   * have no accept/decline step, so a no-show leaves the match 'active'
+   * forever — which blocks the whole round (and thus the whole bracket),
+   * since round-advance requires every match in the round to reach
+   * 'completed'. `match.participants[].answers` (kept in sync with
+   * QuizMatchAnswer by lobbyService.submitAnswer) is the signal used to tell
+   * "present but slow" from "never showed up" — no extra table/join needed.
+   *
+   * One side silent past the grace period -> auto-forfeit them via the
+   * existing lobbyService.forfeitMatch, which already handles winner
+   * assignment, match completion, and triggers the normal round-advance
+   * path (onTournamentMatchEnded). Both sides silent past a longer window ->
+   * neither "deserves" the win, so the match is closed out directly with no
+   * winner; onTournamentMatchEnded already treats a null winnerId as
+   * non-qualifying, so neither side advances.
+   */
+  async sweepStaleKnockoutMatches() {
+    const graceCutoff = new Date(Date.now() - KNOCKOUT_NO_SHOW_GRACE_MS);
+    const staleMatches = await QuizMatch.findAll({
+      where: { matchType: 'tournament', status: 'active', createdAt: { [Op.lt]: graceCutoff } }
+    });
+
+    const bothAbsentCutoff = new Date(Date.now() - KNOCKOUT_BOTH_ABSENT_GRACE_MS);
+
+    for (const match of staleMatches) {
+      try {
+        const [p1, p2] = match.participants || [];
+        if (!p1 || !p2) continue;
+
+        const p1Answered = (p1.answers || []).length > 0;
+        const p2Answered = (p2.answers || []).length > 0;
+
+        if (p1Answered && p2Answered) continue; // both active, not stuck
+
+        if (p1Answered !== p2Answered) {
+          // Exactly one side is silent — forfeit them.
+          const absentUserId = p1Answered ? p2.userId : p1.userId;
+          await require('./lobbyService').forfeitMatch(match.id, absentUserId);
+          console.log(`[TournamentService] Auto-forfeited no-show user ${absentUserId} in knockout match ${match.id}`);
+          continue;
+        }
+
+        // Neither side has answered anything — only close it out once the
+        // longer both-absent window has elapsed, to avoid punishing a match
+        // where both players are just slow to start.
+        if (match.createdAt > bothAbsentCutoff) continue;
+
+        match.changed('participants', true);
+        await match.update({ winnerId: null, status: 'completed', completedAt: new Date() });
+        console.log(`[TournamentService] Closed out both-absent knockout match ${match.id} with no winner`);
+
+        setTimeout(() => {
+          this.onTournamentMatchEnded(match).catch(err => {
+            console.error('[TournamentService] onTournamentMatchEnded (both-absent) failed:', err.message);
+          });
+        }, 0);
+      } catch (err) {
+        console.error(`[TournamentService] sweepStaleKnockoutMatches failed for match ${match.id}:`, err.message);
+      }
+    }
+  }
+
+  /**
+   * Safety net for a tournament stuck in 'in_progress' with no round 1 —
+   * startTournament()'s status-flip transaction can commit successfully and
+   * then the subsequent executeRound(id, 1) call can throw, leaving the
+   * tournament with no round record at all and nothing to ever revisit it
+   * automatically. Retrying is safe: executeRound is idempotent (unique
+   * constraint on tournamentId+roundNumber, treated as a no-op if the round
+   * already exists).
+   *
+   * Filtered on "has zero rows in `rounds` at all", not `currentRound: 0` —
+   * currentRound only advances at the END of round 1 (see
+   * advanceToNextRound), so it reads 0 for that round's entire, often
+   * multi-minute duration, not just the brief pre-creation gap this sweep
+   * targets. Using round existence instead means a tournament only ever
+   * matches this query once, for real: as soon as round 1 exists (whether
+   * from the original call or this retry), it's excluded from every future
+   * tick for the rest of its lifetime — not just re-checked-and-skipped.
+   */
+  async sweepStuckTournamentStarts() {
+    const cutoff = new Date(Date.now() - STUCK_START_GRACE_MS);
+    const stuck = await QuizTournament.findAll({
+      where: { status: 'in_progress', updatedAt: { [Op.lt]: cutoff } },
+      include: [{ model: QuizTournamentRound, as: 'rounds', attributes: ['id'], required: false }]
+    });
+
+    for (const tournament of stuck) {
+      if (tournament.rounds && tournament.rounds.length > 0) continue; // has at least round 1 — healthy, just mid-round
+
+      try {
+        console.warn(`[TournamentService] Retrying stuck round-1 start for tournament ${tournament.id}`);
+        await this.executeRound(tournament.id, 1);
+      } catch (err) {
+        console.error(`[TournamentService] sweepStuckTournamentStarts retry failed for tournament ${tournament.id}:`, err.message);
+      }
+    }
+  }
+
+  /**
+   * "Where do I join right now?" — the persistent, pollable counterpart to
+   * the one-shot 'challenge_accepted'/'round_started' socket pushes. Lets the
+   * frontend always show a registrant their active tournament match/round
+   * even if they missed the live push entirely (reload, reconnect, backgrounded
+   * tab, etc). Deliberately does not touch or reuse lobbyService's
+   * getActiveMatchForUser (that stays scoped to the shared 1v1 engine) — this
+   * is a tournament-only read filtered to matchType:'tournament'.
+   */
+  async getMyActiveTournamentPlay(userId) {
+    const matchCutoff = new Date(Date.now() - ACTIVE_MATCH_LOOKBACK_MS);
+    const match = await QuizMatch.findOne({
+      where: {
+        matchType: 'tournament',
+        status: 'active',
+        createdAt: { [Op.gte]: matchCutoff },
+        participants: { [Op.contains]: [{ userId }] }
+      },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (match) {
+      const payload = await require('./lobbyService').buildChallengeAcceptPayload(match, userId);
+      return {
+        type: 'knockout_match',
+        tournamentId: match.tournamentId,
+        roundNumber: match.roundNumber,
+        ...payload
+      };
+    }
+
+    const participant = await QuizTournamentParticipant.findOne({
+      where: { userId, status: 'active' }
+    });
+
+    if (participant) {
+      const round = await QuizTournamentRound.findOne({
+        where: { tournamentId: participant.tournamentId, status: 'active' }
+      });
+
+      if (round) {
+        const myEntry = round.participants.find(p => p.userId === userId);
+        const finished = myEntry && (myEntry.answers || []).length >= round.questions.length;
+        if (myEntry && !finished && !myEntry.bye) {
+          const tournament = await QuizTournament.findByPk(participant.tournamentId, {
+            attributes: ['id', 'name', 'format']
+          });
+          return {
+            type: 'shared_round',
+            tournamentId: round.tournamentId,
+            tournamentName: tournament?.name || null,
+            format: tournament?.format || null,
+            roundNumber: round.roundNumber
+          };
+        }
+      }
+    }
+
+    return { type: 'none' };
   }
 }
 
