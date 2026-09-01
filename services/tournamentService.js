@@ -1580,6 +1580,21 @@ class TournamentService {
       await this._incrementTournamentsEntered(participant.userId);
     }
 
+    // Every stat write above just landed in UserQuizStats.tournamentStats, but
+    // the global Leaderboard page (leaderboardService.getGlobalLeaderboard /
+    // getTournamentLeaderboard) serves those numbers from a 5-minute Redis
+    // cache. Nothing previously invalidated it here — the only refresh was a
+    // blanket cron every 5 minutes — so a tournament could finish, stats could
+    // be correct in the database, and the Leaderboard page would still show
+    // stale pre-completion numbers for up to 5 minutes. 'all' covers both the
+    // Tournament tab and the Global tab, since the latter's ranking also
+    // factors in tournament_stats->>'totalPrizeMoney'.
+    try {
+      await require('./leaderboardService').invalidateCache('all');
+    } catch (e) {
+      console.error('[TournamentService] Leaderboard cache invalidation failed:', e.message);
+    }
+
     try {
       require('./websocketManager').broadcastTournamentEnded(tournamentId, {
         winnerId: ranked[0]?.userId || null,
