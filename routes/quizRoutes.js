@@ -298,6 +298,16 @@ router.post('/tournament/propose', authMiddleware, quizRateLimiter.tournamentReg
 router.get('/tournament/mine', authMiddleware, quizTournamentController.getMyTournaments);
 
 /**
+ * @route   GET /api/quiz/tournament/my-active-play
+ * @desc    "Where do I join right now?" — persistent lookup of the caller's
+ *          active knockout match or shared-question round, so a registrant
+ *          isn't solely dependent on catching a live socket push
+ * @access  Private
+ * @note    Registered before /tournament/:id for the same reason as above
+ */
+router.get('/tournament/my-active-play', authMiddleware, quizTournamentController.getMyActiveTournamentPlay);
+
+/**
  * @route   GET /api/quiz/tournament/:id
  * @desc    Get tournament details
  * @access  Private

@@ -374,10 +374,34 @@ function setupQuizScheduledTasks() {
     }
   });
 
+  // 🕐 Every minute: Auto-forfeit knockout matches with a silent opponent so
+  // a no-show can't block the round (and thus the bracket) forever
+  cron.schedule('* * * * *', async () => {
+    try {
+      const tournamentService = require('./services/tournamentService');
+      await tournamentService.sweepStaleKnockoutMatches();
+    } catch (error) {
+      console.error('❌ [Cron] Knockout no-show sweep failed:', error.message);
+    }
+  });
+
+  // 🕐 Every minute: Retry a tournament stuck in 'in_progress' with no round 1
+  // (executeRound threw right after the status flip committed)
+  cron.schedule('* * * * *', async () => {
+    try {
+      const tournamentService = require('./services/tournamentService');
+      await tournamentService.sweepStuckTournamentStarts();
+    } catch (error) {
+      console.error('❌ [Cron] Stuck tournament-start sweep failed:', error.message);
+    }
+  });
+
   console.log('⏰ Quiz platform scheduled tasks configured:');
   console.log('   - Every 5 minutes: Refresh leaderboard cache');
   console.log('   - Every minute: Expire old challenges (60s timeout)');
   console.log('   - Every minute: Tournament lifecycle sweep (registration/start/refund)');
   console.log('   - Every minute: Tournament stale-round sweep (AFK timeout)');
+  console.log('   - Every minute: Knockout no-show sweep (auto-forfeit silent opponent)');
+  console.log('   - Every minute: Stuck tournament-start sweep (retry round-1 setup)');
 }
   

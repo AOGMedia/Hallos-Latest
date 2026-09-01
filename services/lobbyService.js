@@ -539,19 +539,33 @@ class LobbyService {
       const questionService = require('./questionService');
       const question = await questionService.getQuestionById(questionId, true);
 
-      // Validate timing (10s limit + 2s latency buffer)
+      // Validate timing (10s limit + 2s latency buffer), paced per-participant:
+      // question N's clock starts when THIS player's own previous answer
+      // landed in this match (or when the match went active, for their first
+      // question) — derived from their own QuizMatchAnswer trail, not the old
+      // match.questionStartTimes[questionId] stamp, which was set ONCE by
+      // whichever player happened to answer first and then shared by both.
+      // That let a trailing/late-arriving player's answers get force-timed-out
+      // based on their OPPONENT's pace rather than their own, and handed the
+      // first submitter of every question a free elapsed-of-zero speed bonus.
+      // Mirrors the identical, already-shipped fix in
+      // tournamentService.submitAnswer's shared-question round path — same
+      // reasoning, same derivation from the participant's own answer history,
+      // no new schema needed. match.questionStartTimes is left in the model
+      // unused rather than migrated away, matching how
+      // QuizTournamentRound.questionStartTimes was already retired the same way.
       const serverTime = Date.now();
-      const questionStartTime = match.questionStartTimes[questionId];
-      
-      if (!questionStartTime) {
-        // First time this question is being answered, set start time
-        match.questionStartTimes[questionId] = serverTime;
-        match.changed('questionStartTimes', true); // Force Sequelize JSONB
-        await match.save({ transaction: t });
-      }
+      const priorAnswer = await QuizMatchAnswer.findOne({
+        where: { matchId, userId },
+        order: [['serverTimestamp', 'DESC']],
+        transaction: t
+      });
+      const questionStartTime = priorAnswer
+        ? Number(priorAnswer.serverTimestamp)
+        : new Date(match.startedAt).getTime();
 
-      const elapsed = (serverTime - (questionStartTime || serverTime)) / 1000;
-      
+      const elapsed = Math.max((serverTime - questionStartTime) / 1000, 0);
+
       if (elapsed > 12 && answerId.toLowerCase() !== 'timeout') {
          // Even if timeout, we must record the answer as timeout so the game can end
          // If elapsed > 12 but answerId != 'timeout', it's a late submission
@@ -560,10 +574,14 @@ class LobbyService {
          answerId = 'timeout'; // Force incorrect
       }
 
-      // Calculate latency and adjusted response time
+      // Calculate latency and adjusted response time. Upper-clamped to the
+      // 10s question window (same clamp tournamentService.submitAnswer
+      // already applies) so a skewed client clock or a reconnect flush can't
+      // inflate the persisted responseTime — and by extension this player's
+      // stats — past what the question was actually open for.
       const clientTimeInt = Math.floor(Number(clientTimestamp));
       const latency = serverTime - clientTimeInt;
-      const adjustedTime = Math.max(elapsed - (latency / 1000), 0);
+      const adjustedTime = Math.min(Math.max(elapsed - (latency / 1000), 0), 10);
 
       // Check if answer is correct
       const isCorrect = (answerId.toLowerCase() !== 'timeout') && (question.correctAnswer === answerId.toLowerCase());

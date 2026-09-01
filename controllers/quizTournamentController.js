@@ -298,6 +298,28 @@ exports.getMyTournaments = async (req, res) => {
 };
 
 /**
+ * "Where do I join right now?" — persistent, pollable counterpart to the
+ * one-shot 'challenge_accepted'/'round_started' socket pushes, so a
+ * registrant can always find their active tournament match/round even if
+ * they missed the live push (reload, reconnect, backgrounded tab, etc).
+ * GET /api/quiz/tournament/my-active-play
+ */
+exports.getMyActiveTournamentPlay = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const tournamentService = require('../services/tournamentService');
+    const result = await tournamentService.getMyActiveTournamentPlay(userId);
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error('[Quiz Tournament Controller] Get my active tournament play error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to check your active tournament play'
+    });
+  }
+};
+
+/**
  * Get details for a specific round — questions (without correct answers,
  * once the round has started), status, and current standings.
  * GET /api/quiz/tournament/:id/round/:roundNumber
