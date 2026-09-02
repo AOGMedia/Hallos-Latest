@@ -63,18 +63,49 @@ class QuizWalletService {
   }
 
   /**
-   * Get user's Chuta balance
+   * Get user's Morgan Point balance.
+   *
+   * Derived by summing the ledger, NOT by reading `balanceAfter` off the most
+   * recent row. The previous implementation did the latter, which made the
+   * balance a cached value that could drift permanently above the truth:
+   *
+   *   - `recordTransaction` read the balance, added to it, then wrote a new
+   *     row. With no lock and no shared transaction, two concurrent writes for
+   *     the same user both read the same starting value, and the second
+   *     silently erased the first. Because only the newest row was consulted,
+   *     an erased *debit* vanished while the *credit* survived — money created
+   *     from nothing, compounding forever after since every later balance was
+   *     derived from the corrupted row.
+   *   - Ordering by `createdAt` (millisecond resolution) tie-breaks
+   *     arbitrarily, so simultaneous rows could resolve to the wrong one.
+   *
+   * Summing makes the ledger the single source of truth, so any historical
+   * drift self-corrects the moment this ships, with no data migration.
+   * `balanceAfter` is still written for audit/history, but is never trusted
+   * for computing a balance.
+   *
+   * Only 'completed' rows count: the status enum allows 'failed'/'reversed',
+   * and those must never affect spendable balance.
+   *
    * @param {number} userId - User ID
-   * @returns {Promise<number>} - Balance in Chuta
+   * @param {import('sequelize').Transaction} [transaction] - Caller's
+   *   transaction. MUST be passed when the balance is being read as part of a
+   *   check-then-write (wagering, withdrawing, entering a tournament), so the
+   *   read sees the caller's own uncommitted rows and is serialised by the
+   *   caller's advisory lock. Omitting it reads committed state only.
+   * @returns {Promise<number>} - Balance in Morgan Points
    */
-  async getBalance(userId) {
-    // Get the most recent transaction to get current balance
-    const lastTransaction = await ChutaCoinTransaction.findOne({
-      where: { userId },
-      order: [['createdAt', 'DESC']]
+  async getBalance(userId, transaction = null) {
+    const result = await ChutaCoinTransaction.findOne({
+      where: { userId, status: 'completed' },
+      attributes: [[sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('amount')), 0), 'total']],
+      raw: true,
+      transaction
     });
 
-    return lastTransaction ? parseFloat(lastTransaction.balanceAfter) : 0;
+    // SUM over DECIMAL comes back as a string from Postgres.
+    const total = parseFloat(result?.total ?? 0);
+    return Number.isFinite(total) ? total : 0;
   }
 
   /**
@@ -85,26 +116,43 @@ class QuizWalletService {
    * @returns {Promise<{success: boolean, balance: number, transaction: Object}>}
    */
   async creditInitialBonus(userId, nickname, avatarUrl) {
-    // Check if user already received initial bonus
-    const existingBonus = await ChutaCoinTransaction.findOne({
-      where: {
-        userId,
-        type: 'initial_bonus'
+    // Take the per-user wallet lock before the "already credited?" check, so
+    // two simultaneous registration requests can't both find no bonus row and
+    // both credit one. The lock is transaction-scoped, so this whole
+    // check-then-credit runs as one serialised unit per user.
+    return sequelize.transaction(async (t) => {
+      await this.lockUserWallet(userId, t);
+
+      const existingBonus = await ChutaCoinTransaction.findOne({
+        where: { userId, type: 'initial_bonus' },
+        transaction: t
+      });
+
+      if (existingBonus) {
+        const currentBalance = await this.getBalance(userId, t);
+        return {
+          success: false,
+          message: 'Initial bonus already credited',
+          balance: currentBalance,
+          transaction: null
+        };
       }
+
+      return this._creditInitialBonusUnlocked(userId, nickname, avatarUrl, t);
     });
+  }
 
-    if (existingBonus) {
-      const currentBalance = await this.getBalance(userId);
-      return {
-        success: false,
-        message: 'Initial bonus already credited',
-        balance: currentBalance,
-        transaction: null
-      };
-    }
-
+  /**
+   * Inner half of creditInitialBonus. Assumes the caller already holds the
+   * per-user wallet lock and has confirmed no bonus exists.
+   * @private
+   */
+  async _creditInitialBonusUnlocked(userId, nickname, avatarUrl, t) {
     // Check nickname uniqueness
-    const existingNickname = await UserQuizStats.findOne({ where: { nickname } });
+    const existingNickname = await UserQuizStats.findOne({
+      where: { nickname },
+      transaction: t
+    });
     if (existingNickname) {
       throw new Error('Nickname already taken. Please choose a different one.');
     }
@@ -114,19 +162,21 @@ class QuizWalletService {
       userId,
       'initial_bonus',
       QuizWalletService.INITIAL_BONUS,
-      { description: 'Welcome bonus' }
+      { description: 'Welcome bonus' },
+      t
     );
 
     // Initialize user quiz stats with nickname and avatar
     await UserQuizStats.findOrCreate({
       where: { userId },
-      defaults: { userId, nickname, avatarUrl }
+      defaults: { userId, nickname, avatarUrl },
+      transaction: t
     });
 
     // If stats already existed (edge case), update nickname/avatar
     await UserQuizStats.update(
       { nickname, avatarUrl },
-      { where: { userId, nickname: null } }
+      { where: { userId, nickname: null }, transaction: t }
     );
 
     return {
@@ -224,17 +274,17 @@ class QuizWalletService {
       throw new Error('Target currency must be USD or NGN');
     }
 
-    const currentBalance = await this.getBalance(userId);
-
     // Validate minimum withdrawal
     if (chutaAmount < QuizWalletService.MIN_WITHDRAWAL) {
       throw new Error(`Minimum withdrawal is ${QuizWalletService.MIN_WITHDRAWAL} Chuta ($${this.chutaToUsd(QuizWalletService.MIN_WITHDRAWAL)})`);
     }
 
-    // Validate sufficient balance
-    if (currentBalance < chutaAmount) {
-      throw new Error('Insufficient balance');
-    }
+    // NOTE: the sufficient-balance check deliberately happens INSIDE the
+    // transaction below, under the per-user lock. Checking out here first —
+    // as this used to — is a classic double-spend window: two concurrent
+    // withdrawals could both read the same balance, both pass, and both pay
+    // out to the platform wallet. This is the one path where that means real
+    // money leaving the system twice.
 
     // Calculate fee (10%)
     const feeAmount = Math.floor(chutaAmount * (QuizWalletService.WITHDRAWAL_FEE_PERCENT / 100));
@@ -252,6 +302,14 @@ class QuizWalletService {
 
     // Use database transaction for atomicity
     const result = await sequelize.transaction(async (t) => {
+      // Serialise against any other wallet write for this user, then verify
+      // the balance under that lock before paying anything out.
+      await this.lockUserWallet(userId, t);
+      const currentBalance = await this.getBalance(userId, t);
+      if (currentBalance < chutaAmount) {
+        throw new Error('Insufficient balance');
+      }
+
       // 1. Debit quiz wallet
       const transaction = await this.recordTransaction(
         userId,
@@ -300,27 +358,36 @@ class QuizWalletService {
    * @returns {Promise<{success: boolean, escrowedAmount: number, newBalance: number}>}
    */
   async escrowFunds(userId, amount, matchId) {
-    const currentBalance = await this.getBalance(userId);
+    // Check and debit under one lock, in one transaction. Previously the check
+    // ran outside any transaction, so a player could stake the same balance in
+    // two matches accepted at the same moment. recordTransaction's own
+    // negative-balance guard would still catch the extreme case, but only
+    // after the fact and with a confusing error — this fails cleanly instead.
+    return sequelize.transaction(async (t) => {
+      await this.lockUserWallet(userId, t);
 
-    if (currentBalance < amount) {
-      throw new Error('Insufficient balance for wager');
-    }
-
-    const transaction = await this.recordTransaction(
-      userId,
-      'match_wager',
-      -amount,
-      {
-        matchId,
-        description: `Escrowed ${amount} Chuta for match`
+      const currentBalance = await this.getBalance(userId, t);
+      if (currentBalance < amount) {
+        throw new Error('Insufficient balance for wager');
       }
-    );
 
-    return {
-      success: true,
-      escrowedAmount: amount,
-      newBalance: parseFloat(transaction.balanceAfter)
-    };
+      const transaction = await this.recordTransaction(
+        userId,
+        'match_wager',
+        -amount,
+        {
+          matchId,
+          description: `Escrowed ${amount} Chuta for match`
+        },
+        t
+      );
+
+      return {
+        success: true,
+        escrowedAmount: amount,
+        newBalance: parseFloat(transaction.balanceAfter)
+      };
+    });
   }
 
   /**
@@ -346,26 +413,6 @@ class QuizWalletService {
       prizeAmount: amount,
       newBalance: parseFloat(transaction.balanceAfter)
     };
-  }
-
-  /**
-   * Release escrowed funds to the winner
-   * @param {string} matchId - Match UUID
-   * @param {number|string} winnerId - Winner's user ID
-   * @param {number} amount - Total escrow amount
-   */
-  async releaseEscrow(matchId, winnerId, amount) {
-    await this.recordTransaction(
-      winnerId,
-      'match_win',
-      amount,
-      {
-        matchId,
-        description: `Won match prize: ${amount} Chuta`
-      }
-    );
-
-    return { success: true };
   }
 
   /**
@@ -436,7 +483,12 @@ class QuizWalletService {
       await this.lockUserWallet(userId, transaction);
     }
 
-    const currentBalance = await this.getBalance(userId);
+    // Read inside the caller's transaction. This previously called
+    // getBalance(userId) with no transaction, which runs on a separate
+    // connection outside the lock taken immediately above — so the lock
+    // guarded nothing and two concurrent registrations could both pass this
+    // check on the same funds.
+    const currentBalance = await this.getBalance(userId, transaction);
 
     if (currentBalance < entryFee) {
       throw new Error('Insufficient balance for tournament entry');
@@ -586,24 +638,41 @@ class QuizWalletService {
    * @returns {Promise<Object>} - Created transaction record
    */
   async recordTransaction(userId, type, amount, metadata = {}, transaction = null) {
-    const currentBalance = await this.getBalance(userId);
-    const newBalance = currentBalance + amount;
+    // Every ledger write is serialised per user by a transaction-scoped
+    // advisory lock, so the read-compute-write below cannot interleave with a
+    // concurrent write for the same user. Without this, two operations both
+    // read the same balance and the second overwrote the first — losing a
+    // debit while keeping a credit, which created money.
+    //
+    // When the caller supplies a transaction we join it (so the debit and
+    // whatever else the caller is doing commit or roll back together, and any
+    // lock the caller already took still applies — re-taking the same advisory
+    // lock within one transaction is a no-op). Otherwise we open our own, so
+    // even a bare call is atomic.
+    const run = async (t) => {
+      await this.lockUserWallet(userId, t);
 
-    if (newBalance < 0) {
-      throw new Error('Transaction would result in negative balance');
-    }
+      // Read inside the lock and inside this transaction, so it reflects any
+      // uncommitted rows the caller has already written.
+      const currentBalance = await this.getBalance(userId, t);
+      const newBalance = currentBalance + amount;
 
-    const txRecord = await ChutaCoinTransaction.create({
-      userId,
-      type,
-      amount,
-      balanceAfter: newBalance,
-      metadata,
-      status: 'completed',
-      description: metadata.description || null
-    }, { transaction });
+      if (newBalance < 0) {
+        throw new Error('Transaction would result in negative balance');
+      }
 
-    return txRecord;
+      return ChutaCoinTransaction.create({
+        userId,
+        type,
+        amount,
+        balanceAfter: newBalance, // audit trail only — never trusted as a balance
+        metadata,
+        status: 'completed',
+        description: metadata.description || null
+      }, { transaction: t });
+    };
+
+    return transaction ? run(transaction) : sequelize.transaction(run);
   }
 
   /**
