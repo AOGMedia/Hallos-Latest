@@ -252,6 +252,13 @@ router.post('/lobby/challenge/:id/cancel', authMiddleware, quizLobbyController.c
 router.get('/lobby/active-match', authMiddleware, quizLobbyController.getActiveMatch);
 
 /**
+ * @route   GET /api/quiz/lobby/live-matches
+ * @desc    Public "Live Now" feed — matches currently in play (1v1 + tournament)
+ * @access  Private
+ */
+router.get('/lobby/live-matches', authMiddleware, quizLobbyController.getLiveMatches);
+
+/**
  * @route   GET /api/quiz/lobby/match/:id
  * @desc    Get match details
  * @access  Private

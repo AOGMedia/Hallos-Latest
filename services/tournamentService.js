@@ -918,6 +918,24 @@ class TournamentService {
       opponent: { userId: p1.userId, nickname: p1Stats?.nickname || `Player_${p1.userId}`, avatarUrl: p1Stats?.avatarUrl || null }
     });
 
+    // Publish to the app-wide "Live Now" feed. Knockout matches are the most
+    // watchable thing on the platform, and standings already make tournament
+    // participation public, so nothing new is exposed here.
+    try {
+      require('./websocketManager').liveMatchStarted({
+        matchId: match.id,
+        matchType: 'tournament',
+        tournamentName: tournament.name || null,
+        roundNumber: round.roundNumber,
+        players: [
+          { userId: p1.userId, nickname: p1Stats?.nickname || `Player_${p1.userId}`, avatarUrl: p1Stats?.avatarUrl || null },
+          { userId: p2.userId, nickname: p2Stats?.nickname || `Player_${p2.userId}`, avatarUrl: p2Stats?.avatarUrl || null }
+        ]
+      });
+    } catch (feedError) {
+      console.error('[TournamentService] Live feed publish failed:', feedError.message);
+    }
+
     return { p1, p2, match };
   }
 
