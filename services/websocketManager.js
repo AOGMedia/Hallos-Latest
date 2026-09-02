@@ -28,6 +28,23 @@ class WebSocketManager {
     this.reconnectionTimers = new Map(); // userId -> timeoutId
     this.pendingEvents = new Map(); // userId -> Array of { event, payload } to emit on reconnect
     this.RECONNECTION_GRACE_PERIOD = 60000; // 60 seconds — generous for mobile users
+
+    // Public "Live Now" feed — matchId -> live match card. In-memory on
+    // purpose: this is presentation state, cheap to rebuild and worthless
+    // once stale, so it must never be treated as a source of truth (the
+    // authoritative record is always the QuizMatch row). A process restart
+    // simply empties the feed and it refills as matches progress.
+    this.liveMatches = new Map();
+    this.LIVE_MATCH_STALE_MS = 15 * 60 * 1000; // drop anything not updated in 15m
+
+    // Recently-finished matches, newest first, so the lobby's "Live Now"
+    // section still has something real to show when nothing is being played.
+    // Hard-capped and age-bounded: this array is the only structure here that
+    // grows on a per-match basis, so it must never be allowed to accumulate
+    // unbounded on a long-running process.
+    this.recentResults = [];
+    this.RECENT_RESULTS_MAX = 20;
+    this.RECENT_RESULTS_MAX_AGE_MS = 60 * 60 * 1000; // an hour old stops being "recent"
   }
 
   /**
@@ -917,6 +934,136 @@ class WebSocketManager {
         timestamp: Date.now()
       });
     }).catch(() => {});
+  }
+
+  /**
+   * ── Live Now feed ──────────────────────────────────────────────────────
+   *
+   * A public, app-wide view of matches currently being played, so the lobby
+   * feels alive rather than empty. Everything here is derived from moments
+   * the engine already reaches (match start, each answer, match end) — no
+   * new polling, no extra DB reads on the hot path.
+   *
+   * Only ever carries nickname + score + progress. Never question text or
+   * answers: viewers may face those same questions later.
+   */
+  liveMatchStarted({ matchId, matchType, players, tournamentName = null, roundNumber = null }) {
+    if (!this.io) return;
+    // Two real, identified players or it isn't a match worth showing.
+    if (!Array.isArray(players) || players.length !== 2) return;
+    if (players.some(p => !p || !p.userId)) return;
+
+    const card = {
+      matchId,
+      matchType, // 'lobby' | 'tournament'
+      tournamentName,
+      roundNumber,
+      players: players.map(p => ({
+        userId: p.userId,
+        nickname: p.nickname || `Player_${p.userId}`,
+        avatarUrl: p.avatarUrl || null,
+        score: 0,
+        answered: 0
+      })),
+      totalQuestions: null,
+      startedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    this.liveMatches.set(matchId, card);
+    this.io.emit('live_match_started', card);
+  }
+
+  liveMatchProgress(matchId, { userId, score, answersCount, totalQuestions }) {
+    if (!this.io) return;
+    const card = this.liveMatches.get(matchId);
+    if (!card) return; // never started (e.g. server restarted mid-match) — nothing to update
+
+    const player = card.players.find(p => p.userId === userId);
+    if (!player) return;
+
+    player.score = score ?? player.score;
+    player.answered = answersCount ?? player.answered;
+    if (totalQuestions) card.totalQuestions = totalQuestions;
+    card.updatedAt = Date.now();
+
+    this.io.emit('live_match_progress', {
+      matchId,
+      players: card.players,
+      totalQuestions: card.totalQuestions
+    });
+  }
+
+  /**
+   * Retire a match from the live feed and record it as a recent result.
+   *
+   * The finished card already holds both players' final scores, so the result
+   * is built from memory — no DB read on the match-end path. A match that was
+   * never in the live feed (e.g. started before a restart) produces no result
+   * rather than a card with zeroed scores that would misreport the outcome.
+   */
+  liveMatchEnded(matchId, { winnerId = null } = {}) {
+    if (!this.io) return;
+
+    const card = this.liveMatches.get(matchId);
+    this.liveMatches.delete(matchId);
+    this.io.emit('live_match_ended', { matchId, winnerId });
+
+    if (!card) return;
+
+    // A match nobody actually played (both scores zero, no answers) is not a
+    // result worth showing — it's an abandoned or force-resolved match.
+    const anyProgress = card.players.some(p => (p.answered || 0) > 0);
+    if (!anyProgress) return;
+
+    const result = {
+      matchId,
+      matchType: card.matchType,
+      tournamentName: card.tournamentName,
+      roundNumber: card.roundNumber,
+      winnerId: winnerId ?? null,
+      players: card.players.map(p => ({
+        userId: p.userId,
+        nickname: p.nickname,
+        avatarUrl: p.avatarUrl,
+        score: p.score
+      })),
+      endedAt: Date.now()
+    };
+
+    this.recentResults.unshift(result);
+    // Hard cap, enforced on every write — the single guard that keeps this
+    // from growing without bound on a long-running process.
+    if (this.recentResults.length > this.RECENT_RESULTS_MAX) {
+      this.recentResults.length = this.RECENT_RESULTS_MAX;
+    }
+
+    this.io.emit('live_match_result', result);
+  }
+
+  /**
+   * Current feed, newest first. Sweeps stale entries on read — a match whose
+   * end event never fired (crash, forfeit path that bypassed cleanup) would
+   * otherwise sit in the feed forever advertising a game nobody is playing.
+   */
+  getLiveMatches() {
+    const cutoff = Date.now() - this.LIVE_MATCH_STALE_MS;
+    for (const [matchId, card] of this.liveMatches) {
+      if (card.updatedAt < cutoff) this.liveMatches.delete(matchId);
+    }
+    return Array.from(this.liveMatches.values()).sort((a, b) => b.startedAt - a.startedAt);
+  }
+
+  /**
+   * Recently-finished matches, newest first. Age-filtered on read so an idle
+   * process can't keep serving hour-old games as "just finished"; the array is
+   * also trimmed here so entries that age out are actually released rather
+   * than merely hidden.
+   */
+  getRecentResults() {
+    const cutoff = Date.now() - this.RECENT_RESULTS_MAX_AGE_MS;
+    this.recentResults = this.recentResults.filter(r => r.endedAt >= cutoff);
+    return this.recentResults;
   }
 
   /**

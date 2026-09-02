@@ -11,6 +11,31 @@ const lobbyService = require('../services/lobbyService');
  */
 
 /**
+ * Public "Live Now" feed — matches currently being played, 1v1 and tournament.
+ * Read-only snapshot so the panel has content on first paint; live updates
+ * then arrive over the socket (live_match_started/progress/ended).
+ * GET /api/quiz/lobby/live-matches
+ */
+exports.getLiveMatches = async (req, res) => {
+  try {
+    const websocketManager = require('../services/websocketManager');
+    return res.status(200).json({
+      success: true,
+      matches: websocketManager.getLiveMatches(),
+      // Recently-finished games, so the panel still has something real to show
+      // when nothing is being played right now.
+      recentResults: websocketManager.getRecentResults()
+    });
+  } catch (error) {
+    console.error('[Quiz Lobby Controller] Get live matches error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to get live matches'
+    });
+  }
+};
+
+/**
  * Create a new challenge
  * POST /api/quiz/lobby/challenge/create
  */

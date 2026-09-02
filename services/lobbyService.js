@@ -344,6 +344,29 @@ class LobbyService {
       console.error('[LobbyService] Failed to queue challenge_accepted:', wsError.message);
     }
 
+    // Publish to the app-wide "Live Now" feed. Best-effort presentation only —
+    // it must never be able to fail an accepted, escrowed match.
+    try {
+      require('./websocketManager').liveMatchStarted({
+        matchId: match.id,
+        matchType: 'lobby',
+        players: [
+          {
+            userId: match.challengerId,
+            nickname: challengerStats?.nickname || `Player_${match.challengerId}`,
+            avatarUrl: challengerStats?.avatarUrl || null
+          },
+          {
+            userId,
+            nickname: acceptorStats?.nickname || `Player_${userId}`,
+            avatarUrl: acceptorStats?.avatarUrl || null
+          }
+        ]
+      });
+    } catch (feedError) {
+      console.error('[LobbyService] Live feed publish failed:', feedError.message);
+    }
+
     return {
       success: true,
       matchId: match.id,
@@ -394,8 +417,11 @@ class LobbyService {
       completedAt: new Date()
     });
 
-    // Notify challenger their challenge was declined
-    this._emitToUser(challenger.userId, 'challenge_declined', {
+    // Notify challenger their challenge was declined. Durable: the challenger
+    // is sitting on a blocking "waiting for opponent" modal, and their wager
+    // has just been refunded. Dropping this because they blipped for a second
+    // leaves them staring at that modal with no idea the challenge is dead.
+    this._emitToUserDurable(challenger.userId, 'challenge_declined', {
       challengeId: match.id,
       refundAmount: challenger.wagerAmount
     });
@@ -442,9 +468,12 @@ class LobbyService {
       completedAt: new Date()
     });
 
-    // Notify opponent if it was a direct challenge
+    // Notify opponent if it was a direct challenge. Durable so a queued
+    // 'challenge_received' can't outlive the cancellation that voided it —
+    // otherwise a reconnecting opponent is shown an invite for a challenge
+    // that no longer exists, and accepting it just errors.
     if (match.opponentId) {
-      this._emitToUser(match.opponentId, 'challenge_cancelled', {
+      this._emitToUserDurable(match.opponentId, 'challenge_cancelled', {
         challengeId: match.id,
         challengerId: userId
       });
@@ -505,7 +534,10 @@ class LobbyService {
     // Notify original challenger about the counter-offer
     const UserQuizStats = require('../models/UserQuizStats');
     const counterStats = await UserQuizStats.findOne({ where: { userId }, attributes: ['nickname'] });
-    this._emitToUser(challenger.userId, 'challenge_counter', {
+    // Durable for the same reason as decline: the challenger is blocked on a
+    // modal waiting for an answer, and this IS the answer. A counter-offer is
+    // also actionable — they need to see it to accept or reject it.
+    this._emitToUserDurable(challenger.userId, 'challenge_counter', {
       challengeId: counterMatch.challengeId,
       newWagerAmount,
       opponentNickname: counterStats?.nickname || `Player_${userId}`
@@ -666,6 +698,16 @@ class LobbyService {
                 websocketManager.sendOrQueue(p.userId, 'opponent_progress', progressPayload);
               }
             }
+
+            // Keep the public "Live Now" feed in step with the same scores the
+            // players themselves see. Derived from the payload already built
+            // above, so this costs no extra query.
+            websocketManager.liveMatchProgress(matchId, {
+              userId,
+              score: participant.score,
+              answersCount: participant.answers.length,
+              totalQuestions: match.questions.length
+            });
           }
 
           if (allAnswered) {
@@ -809,12 +851,16 @@ class LobbyService {
           };
 
           websocketManager.io.to(`match:${matchId}`).emit('match_ended', payload);
-          
+
           // Also send via sendOrQueue for robust delivery to disconnected players returning to game
           websocketManager.sendOrQueue(participant1.userId, 'match_ended', payload);
           if (participant2?.userId) {
             websocketManager.sendOrQueue(participant2.userId, 'match_ended', payload);
           }
+
+          // Retire the card from the public feed — otherwise it keeps
+          // advertising a finished game until the staleness sweep catches it.
+          websocketManager.liveMatchEnded(matchId, { winnerId });
         }
       } catch (wsError) {
         console.error('[LobbyService] Failed to emit match_ended:', wsError.message);
@@ -904,6 +950,10 @@ class LobbyService {
           totalTime: 0,
           reason: 'forfeit'
         });
+
+        // Forfeits end the match without passing through endMatch, so the
+        // feed has to be cleaned up here too.
+        websocketManager.liveMatchEnded(matchId, { winnerId });
       }
     } catch (wsError) {
       console.error('[LobbyService] Failed to emit match_ended on forfeit:', wsError.message);
