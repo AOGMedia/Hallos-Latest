@@ -120,10 +120,9 @@ class WebSocketManager {
     });
     this.userSockets.set(socket.id, userId);
 
-    // Mark user as active in Redis
-    activeUserTracker.markUserActive(userId).catch(err => {
-      console.error(`[WebSocket] Error marking user ${userId} active:`, err.message);
-    });
+    // Mark user as active in Redis — but only if they've actually completed
+    // quiz registration. See markUserActiveIfRegistered.
+    this.markUserActiveIfRegistered(userId);
 
     // Flush any "your friend joined via your invite" notifications that
     // couldn't be delivered live because this user was offline at claim time.
@@ -182,10 +181,9 @@ class WebSocketManager {
     });
     this.userSockets.set(socket.id, userId);
 
-    // Mark user as active in Redis
-    activeUserTracker.markUserActive(userId).catch(err => {
-      console.error(`[WebSocket] Error marking user ${userId} active:`, err.message);
-    });
+    // Mark user as active in Redis — but only if they've actually completed
+    // quiz registration. See markUserActiveIfRegistered.
+    this.markUserActiveIfRegistered(userId);
 
     // Flush any invite-claim notifications missed while briefly disconnected
     require('./quizInviteService').notifyPendingInviteClaims(userId).catch(err => {
@@ -1153,6 +1151,38 @@ class WebSocketManager {
     });
 
     this.pendingEvents.delete(normalizedId);
+  }
+
+  /**
+   * Mark a user active in Redis, but only once they've completed quiz
+   * registration (i.e. they have a UserQuizStats row).
+   *
+   * A valid platform JWT proves identity, not that the user has set up a quiz
+   * profile. Marking everyone active put unregistered users into the lobby,
+   * where getOnlinePlayers has no nickname to show and falls back to
+   * `Player_<id>` — and worse, made them challengeable, so a challenge could be
+   * accepted by an account the app can't fully represent.
+   *
+   * They stay connected either way: the socket still delivers events, so they
+   * can register and then appear normally. They're simply not advertised as
+   * available to play until they have an identity.
+   *
+   * Fails closed — if the lookup errors we skip marking them active rather than
+   * risk advertising a nameless player.
+   */
+  markUserActiveIfRegistered(userId) {
+    const UserQuizStats = require('../models/UserQuizStats');
+    UserQuizStats.findOne({ where: { userId }, attributes: ['userId', 'nickname'] })
+      .then(stats => {
+        if (!stats || !stats.nickname) {
+          console.log(`[WebSocket] User ${userId} has no quiz profile — not marking active`);
+          return;
+        }
+        return activeUserTracker.markUserActive(userId);
+      })
+      .catch(err => {
+        console.error(`[WebSocket] Error marking user ${userId} active:`, err.message);
+      });
   }
 
   /**
