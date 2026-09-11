@@ -1296,7 +1296,15 @@ class TournamentService {
     for (const entry of round.participants) {
       if (entry.bye) continue;
       const participant = await QuizTournamentParticipant.findOne({ where: { tournamentId, userId: entry.userId } });
-      if (!participant || participant.status !== 'active') continue;
+      // Deliberately NOT gated on `participant.status === 'active'`: having a
+      // real (non-bye) entry here already proves they played this round and
+      // earned this score, independent of whatever their status happens to
+      // be *right now*. Gating on 'active' raced against the disconnect
+      // reconnection-grace-period forfeit timer — if that timer fired (status
+      // flipped to 'eliminated') around the same moment this ran, the
+      // participant's entire round score was silently dropped from
+      // totalScore, corrupting ranking/prize distribution for everyone.
+      if (!participant) continue;
 
       const avgRow = await QuizTournamentAnswer.findOne({
         where: { tournamentId, userId: entry.userId },
