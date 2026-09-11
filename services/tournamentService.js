@@ -1429,13 +1429,21 @@ class TournamentService {
       }
     );
 
-    // Mark eliminated participants
+    // Mark eliminated participants. Deliberately NOT filtered by
+    // `currentRound: currentRoundNumber` — that column only ever advances for
+    // participants who *qualify* (see the update just above), so a
+    // participant knocked out in round 1 still has it at its initial value of
+    // 0, never equal to currentRoundNumber (1). That filter silently excluded
+    // every round-1 loser from ever being marked eliminated, leaving them
+    // permanently 'active' with current_round stuck at 0 — any participant
+    // who is 'active' and not in this round's qualifying list is, by
+    // definition, eliminated, regardless of what their stored currentRound
+    // says.
     const eliminatedParticipants = await QuizTournamentParticipant.findAll({
       where: {
         tournamentId,
         userId: { [Op.notIn]: qualifyingUserIds },
-        status: 'active',
-        currentRound: currentRoundNumber
+        status: 'active'
       }
     });
 
