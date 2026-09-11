@@ -64,6 +64,33 @@ function emitToTournamentRoom(tournamentId, event, payload) {
   }
 }
 
+/**
+ * Room broadcast PLUS a direct per-user fan-out. A room broadcast only
+ * reaches sockets that happen to already be joined to `tournament:{id}` —
+ * joining that room is entirely client-initiated (on viewing the tournament
+ * detail screen), with no connection to registration, so a participant who
+ * registered from a list screen and never opened that specific tournament
+ * before start time is simply never in the room and gets nothing. Knockout
+ * match invites and eliminations already avoid this by going direct via
+ * `emitToUser`/`sendOrQueue` (which queues for delivery on reconnect); this
+ * brings `tournament_started` and shared-question `round_started` — the two
+ * events that were still room-only — in line with that same durable pattern.
+ * `getMyActiveTournamentPlay` remains the backstop for anyone fully offline
+ * at the moment this fires.
+ */
+function emitToTournamentRoomAndUsers(tournamentId, event, payload, userIds) {
+  emitToTournamentRoom(tournamentId, event, payload);
+  if (!userIds || userIds.length === 0) return;
+  try {
+    const websocketManager = require('./websocketManager');
+    for (const userId of userIds) {
+      websocketManager.sendOrQueue(userId, event, payload);
+    }
+  } catch (e) {
+    console.error(`[TournamentService] Failed direct fan-out of '${event}' for tournament ${tournamentId}:`, e.message);
+  }
+}
+
 /** Fisher-Yates shuffle — used for random bracket seeding. */
 function shuffle(array) {
   const result = [...array];
@@ -423,13 +450,20 @@ class TournamentService {
         }
       }
 
-      const balanceCheck = await quizWalletService.verifyBalance(userId, tournament.entryFee);
-      if (!balanceCheck.sufficient) {
-        throw new Error(`Insufficient balance. You have ${balanceCheck.currentBalance} Chuta, need ${tournament.entryFee} Chuta`);
-      }
+      // A free tournament costs nothing to join — a negative balance (however
+      // it arose) shouldn't be able to block a $0 debit. Skipping the check
+      // entirely when entryFee is 0 also skips deductTournamentEntry below,
+      // since debiting 0 from a negative balance would otherwise still throw
+      // inside recordTransaction's own negative-balance guard.
+      if (tournament.entryFee > 0) {
+        const balanceCheck = await quizWalletService.verifyBalance(userId, tournament.entryFee);
+        if (!balanceCheck.sufficient) {
+          throw new Error(`Insufficient balance. You have ${balanceCheck.currentBalance} Chuta, need ${tournament.entryFee} Chuta`);
+        }
 
-      // Deduct entry fee — atomic with everything else in this transaction
-      await quizWalletService.deductTournamentEntry(userId, tournament.entryFee, tournamentId, t);
+        // Deduct entry fee — atomic with everything else in this transaction
+        await quizWalletService.deductTournamentEntry(userId, tournament.entryFee, tournamentId, t);
+      }
 
       // Add to prize pool
       await tournament.increment('prizePool', { by: tournament.entryFee, transaction: t });
@@ -684,12 +718,16 @@ class TournamentService {
     const tournament = await QuizTournament.findByPk(tournamentId);
 
     try {
+      const activeParticipants = await QuizTournamentParticipant.findAll({
+        where: { tournamentId, status: 'active' },
+        attributes: ['userId']
+      });
       require('./websocketManager').broadcastTournamentStarted(tournamentId, {
         format: tournament.format,
         participantCount,
         totalRounds,
         startTime: tournament.startTime
-      });
+      }, activeParticipants.map(p => p.userId));
     } catch (e) {
       console.error('[TournamentService] broadcastTournamentStarted failed:', e.message);
     }
@@ -1065,7 +1103,7 @@ class TournamentService {
       id: q.id, questionText: q.questionText, options: q.options, difficulty: q.difficulty
     }));
 
-    emitToTournamentRoom(tournament.id, 'round_started', {
+    emitToTournamentRoomAndUsers(tournament.id, 'round_started', {
       tournamentId: tournament.id,
       roundNumber: round.roundNumber,
       format: tournament.format,
@@ -1073,7 +1111,7 @@ class TournamentService {
       totalQuestions: questionsForClient.length,
       timeLimit: QUESTION_TIME_LIMIT_SEC,
       startTime: round.startedAt
-    });
+    }, participants.map(p => p.userId));
   }
 
   /**
@@ -1081,6 +1119,15 @@ class TournamentService {
    * Mirrors lobbyService.submitAnswer's locking/timing/scoring pattern.
    */
   async submitAnswer(tournamentId, roundNumber, userId, questionId, answerId, clientTimestamp) {
+    // Fetched before opening the transaction below, deliberately: this is a
+    // read of quiz_questions, unrelated to the round row the transaction is
+    // about to lock. At scale (many hundreds of participants answering the
+    // same round), every submission serializes on that round's lock — the
+    // longer each transaction holds it, the deeper that queue backs up. This
+    // one query doesn't need to be inside it at all.
+    const questionService_ = require('./questionService');
+    const question = await questionService_.getQuestionById(questionId, true);
+
     const roundComplete = await sequelize.transaction(async (t) => {
       const round = await QuizTournamentRound.findOne({
         where: { tournamentId, roundNumber },
@@ -1102,9 +1149,6 @@ class TournamentService {
         transaction: t
       });
       if (existingAnswer) throw new Error('Question already answered');
-
-      const questionService_ = require('./questionService');
-      const question = await questionService_.getQuestionById(questionId, true);
 
       const serverTime = Date.now();
 
