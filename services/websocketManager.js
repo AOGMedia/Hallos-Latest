@@ -28,6 +28,17 @@ class WebSocketManager {
     this.reconnectionTimers = new Map(); // userId -> timeoutId
     this.pendingEvents = new Map(); // userId -> Array of { event, payload } to emit on reconnect
     this.RECONNECTION_GRACE_PERIOD = 60000; // 60 seconds — generous for mobile users
+    // Tournament forfeits are higher-stakes than a casual 1v1 lobby match (real
+    // entry fees, and there's no opponent actively waiting on this one specific
+    // person the way a 1v1 match has) and the effective worst case before this
+    // timer even starts already includes Socket.IO's own ~60s pingTimeout for a
+    // silent connection drop — so a flat 60s on top of that (up to ~120s total,
+    // irreversible once it fires) was too tight for normal mobile conditions
+    // (OS backgrounding, a brief dead zone, a carrier handoff). This is
+    // intentionally separate from RECONNECTION_GRACE_PERIOD rather than just
+    // raising that constant, since a 1v1 lobby opponent genuinely is waiting
+    // and shouldn't inherit a longer wait meant for tournament stakes.
+    this.TOURNAMENT_RECONNECTION_GRACE_PERIOD = 150000; // 150 seconds
 
     // Public "Live Now" feed — matchId -> live match card. In-memory on
     // purpose: this is presentation state, cheap to rebuild and worthless
@@ -784,9 +795,13 @@ class WebSocketManager {
       }
     }
 
-    // If user is in active match/tournament, start reconnection grace period
+    // If user is in active match/tournament, start reconnection grace period.
+    // Tournament participants get the longer window (see constructor comment)
+    // regardless of whether they're also mid-knockout-match, since the
+    // tournament stakes are what matters for how lenient to be.
     if (matchId || tournamentId) {
-      console.log(`[WebSocket] User ${userId} disconnected from active game. Starting ${this.RECONNECTION_GRACE_PERIOD / 1000}s grace period...`);
+      const gracePeriodMs = tournamentId ? this.TOURNAMENT_RECONNECTION_GRACE_PERIOD : this.RECONNECTION_GRACE_PERIOD;
+      console.log(`[WebSocket] User ${userId} disconnected from active game. Starting ${gracePeriodMs / 1000}s grace period...`);
 
       // Store disconnection info
       this.disconnectedUsers.set(userId, {
@@ -799,7 +814,7 @@ class WebSocketManager {
       // Set reconnection timer
       const timerId = setTimeout(() => {
         this.handleReconnectionTimeout(userId, matchId, tournamentId);
-      }, this.RECONNECTION_GRACE_PERIOD);
+      }, gracePeriodMs);
 
       this.reconnectionTimers.set(userId, timerId);
 
@@ -807,14 +822,14 @@ class WebSocketManager {
       if (matchId) {
         this.io.to(`match:${matchId}`).emit('opponent_disconnected', {
           userId,
-          reconnectionDeadline: Date.now() + this.RECONNECTION_GRACE_PERIOD
+          reconnectionDeadline: Date.now() + gracePeriodMs
         });
       }
 
       if (tournamentId) {
         this.io.to(`tournament:${tournamentId}`).emit('participant_disconnected', {
           userId,
-          reconnectionDeadline: Date.now() + this.RECONNECTION_GRACE_PERIOD
+          reconnectionDeadline: Date.now() + gracePeriodMs
         });
       }
     }
@@ -1087,14 +1102,18 @@ class WebSocketManager {
   }
 
   /**
-   * Broadcast tournament started event
+   * Broadcast tournament started event, plus a direct per-user fan-out to
+   * `participantUserIds` (queued via sendOrQueue for anyone not currently
+   * connected) — joining the tournament room is client-initiated and has no
+   * connection to registration, so a room-only emit misses anyone who
+   * registered but never opened this tournament's screen before start time.
    */
-  broadcastTournamentStarted(tournamentId, data) {
-    this.io.to(`tournament:${tournamentId}`).emit('tournament_started', {
-      tournamentId,
-      ...data,
-      timestamp: Date.now()
-    });
+  broadcastTournamentStarted(tournamentId, data, participantUserIds = []) {
+    const payload = { tournamentId, ...data, timestamp: Date.now() };
+    this.io.to(`tournament:${tournamentId}`).emit('tournament_started', payload);
+    for (const userId of participantUserIds) {
+      this.sendOrQueue(userId, 'tournament_started', payload);
+    }
   }
 
   /**

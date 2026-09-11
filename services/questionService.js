@@ -5,9 +5,33 @@ const QuizQuestion = require('../models/QuizQuestion');
 const QuizCategory = require('../models/QuizCategory');
 const { uploadFileToS3 } = require('./s3Service');
 
+const NAMED_HTML_ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'"
+};
+
+/**
+ * Decode HTML entities (numeric and the handful of common named ones) back to
+ * their literal characters. Some upload source (a CMS export, a web-scraped
+ * source, or a "sanitize HTML" step run before this data ever reached this
+ * app) encoded punctuation to entities and the encoded form was stored
+ * verbatim — players saw literal `Mbah&#x27;s administration` on screen
+ * instead of `Mbah's administration`. Intentionally minimal (no dependency
+ * added) — numeric entities (`&#39;`, `&#x27;`) cover the overwhelming
+ * majority of real-world cases like this, decimal and hex both.
+ */
+function decodeHtmlEntities(text) {
+  if (typeof text !== 'string' || !text.includes('&')) return text;
+  return text
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&([a-zA-Z]+|#\d+);/g, (match, name) => (
+      Object.prototype.hasOwnProperty.call(NAMED_HTML_ENTITIES, name) ? NAMED_HTML_ENTITIES[name] : match
+    ));
+}
+
 /**
  * Question Service
- * 
+ *
  * Manages quiz question operations including:
  * - Excel file parsing and upload
  * - Question validation
@@ -146,7 +170,7 @@ class QuestionService {
     // Check required fields — accept both "Option A" and "OptionA" formats
     const getField = (row, ...keys) => {
       for (const key of keys) {
-        if (row[key] !== undefined && String(row[key]).trim() !== '') return String(row[key]).trim();
+        if (row[key] !== undefined && String(row[key]).trim() !== '') return decodeHtmlEntities(String(row[key]).trim());
       }
       return null;
     };
@@ -374,6 +398,17 @@ class QuestionService {
       throw new Error('Difficulty must be easy, medium, or hard');
     }
 
+    if (typeof updates.questionText === 'string') {
+      updates.questionText = decodeHtmlEntities(updates.questionText.trim());
+    }
+    if (updates.options && typeof updates.options === 'object') {
+      const decodedOptions = {};
+      for (const [key, value] of Object.entries(updates.options)) {
+        decodedOptions[key] = typeof value === 'string' ? decodeHtmlEntities(value.trim()) : value;
+      }
+      updates.options = decodedOptions;
+    }
+
     await question.update(updates);
     return question;
   }
@@ -417,3 +452,6 @@ class QuestionService {
 }
 
 module.exports = new QuestionService();
+// Exposed for the one-off data-cleanup pass on already-affected rows
+// (scripts/decodeQuestionHtmlEntities.js) — same decoder new uploads use.
+module.exports.decodeHtmlEntities = decodeHtmlEntities;
