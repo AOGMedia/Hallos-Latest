@@ -1622,10 +1622,15 @@ class TournamentService {
         await quizWalletService.awardTournamentPrize(participant.userId, prizeAmount, tournamentId, prize.placement);
       }
 
+      // Every non-winner placement (2nd, 3rd) used to keep `participant.status`
+      // unchanged here, which for shared-question formats (classic/speed_run,
+      // no separate elimination step) meant it stayed 'active' forever — a
+      // finished tournament with a real placement and prize still showing its
+      // 2nd/3rd place finishers as "active" in that tournament indefinitely.
       await participant.update({
         placement: prize.placement,
         prizeWon: prizeAmount,
-        status: prize.placement === 1 ? 'winner' : participant.status
+        status: prize.placement === 1 ? 'winner' : 'eliminated'
       });
 
       await this.updateUserTournamentStats(participant.userId, tournament, prize.placement, prizeAmount);
@@ -1656,6 +1661,13 @@ class TournamentService {
     for (const participant of allParticipants) {
       if (rankedUserIds.has(participant.userId)) continue; // already handled above
       await this._incrementTournamentsEntered(participant.userId);
+      // Same reasoning as the top-3 status fix above: a 4th-place-or-lower
+      // finisher in a shared-question-format tournament had no other step
+      // that ever moved them off 'active', even though the tournament is
+      // now fully completed.
+      if (participant.status === 'active') {
+        await participant.update({ status: 'eliminated' });
+      }
     }
 
     // Every stat write above just landed in UserQuizStats.tournamentStats, but
