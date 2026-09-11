@@ -21,10 +21,30 @@ const API_BASE = 'https://hallos-latest.onrender.com';
 const NUM_ACCOUNTS = 8;
 const RUN_ID = Date.now();
 
-const dbClient = new Client({
+// A long-running test (the AFK/disconnect scenarios alone span several
+// minutes of real wall-clock waiting) can outlast a single Postgres
+// connection — Render's managed instance can drop an idle connection, and
+// `pg.Client` emits an uncaught 'error' event that crashes the whole process
+// if nothing is listening for it. Reconnecting transparently on error (rather
+// than just adding a no-op listener) keeps every later `dbClient.query(...)`
+// call in this file working without having to change any of them.
+let dbClient = new Client({
   connectionString: process.env.DATABASE_URL,
   ssl: { require: true, rejectUnauthorized: false }
 });
+
+function attachDbErrorHandler(client) {
+  client.on('error', (err) => {
+    console.error(`[${new Date().toISOString()}] DB connection error, reconnecting:`, err.message);
+    dbClient = new Client({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { require: true, rejectUnauthorized: false }
+    });
+    attachDbErrorHandler(dbClient);
+    dbClient.connect().catch((e) => console.error('DB reconnect failed:', e.message));
+  });
+}
+attachDbErrorHandler(dbClient);
 
 function log(...args) { console.log(`[${new Date().toISOString()}]`, ...args); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -230,7 +250,11 @@ async function runSharedFormatScenario(format, categoryId, accounts) {
   await sleep(2000); // let sockets finish connecting/joining before starting
   await startTournament(tournamentId);
 
-  const final = await waitForTournamentStatus(tournamentId, ['completed', 'cancelled'], 5 * 60 * 1000);
+  // battle_royale eliminates down to 2 over several rounds (each with its own
+  // full answer + broadcast cycle), so it legitimately needs longer than a
+  // single-round classic/speed_run tournament to reach 'completed'.
+  const waitMs = format === 'battle_royale' ? 10 * 60 * 1000 : 5 * 60 * 1000;
+  const final = await waitForTournamentStatus(tournamentId, ['completed', 'cancelled'], waitMs);
   log(`  Final status: ${JSON.stringify(final)}`);
 
   const winnerRow = await dbClient.query(
