@@ -73,7 +73,12 @@ const QuizTournamentAnswer = sequelize.define('QuizTournamentAnswer', {
 }, {
   tableName: 'quiz_tournament_answers',
   timestamps: true,
-  createdAt: 'created_at',
+  // NB: do not add `createdAt: 'created_at'` here. That renames the
+  // *attribute* to `created_at`, so `createdAt` stops existing and any
+  // `order: [['createdAt', ...]]` leaks through as a raw column reference —
+  // "column QuizTournamentAnswer.createdAt does not exist". `underscored:
+  // true` already maps the `createdAt` attribute to the `created_at` column
+  // (see ChatMessage.js / ChatConversation.js, which document this same fix).
   updatedAt: false,
   underscored: true
 });

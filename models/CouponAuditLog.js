@@ -34,9 +34,13 @@ const CouponAuditLog = sequelize.define('CouponAuditLog', {
   }
 }, {
   tableName: 'coupon_audit_log',
+  // NB: do not add `createdAt: 'created_at'` here — combined with
+  // `underscored: true` it renames the *attribute* to `created_at`, breaking
+  // any `order: [['createdAt', ...]]` query (see QuizTournamentAnswer.js /
+  // ChatMessage.js, which hit and document this exact bug). `underscored:
+  // true` alone already maps the `createdAt` attribute to the right column.
   timestamps: true,
   underscored: true,
-  createdAt: 'created_at',
   updatedAt: false
 });
 

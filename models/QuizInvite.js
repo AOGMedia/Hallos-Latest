@@ -90,9 +90,12 @@ const QuizInvite = sequelize.define('QuizInvite', {
   }
 }, {
   tableName: 'quiz_invites',
-  underscored: true,
-  createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  // NB: do not add explicit `createdAt`/`updatedAt` column-name overrides
+  // here — combined with `underscored: true` they rename the *attributes*
+  // themselves, breaking any `order: [['createdAt', ...]]` query (see
+  // QuizTournamentAnswer.js / ChatMessage.js, which hit and document this
+  // exact bug). `underscored: true` alone already maps both correctly.
+  underscored: true
 });
 
 QuizInvite.associate = (models) => {
