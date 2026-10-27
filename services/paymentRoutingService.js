@@ -204,7 +204,7 @@ class PaymentRoutingService {
               contentType,
               contentId,
               currency
-            });
+            }, transaction);
             
             console.log(`[Payment Routing] Recorded coupon usage for ${couponCode}`);
           }
