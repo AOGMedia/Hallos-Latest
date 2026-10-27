@@ -5,21 +5,46 @@ const path = require('path');
 const { sanitizeSVG, isValidSVG } = require('../utils/svgSanitizer');
 
 /**
- * AWS S3 Service for handling thumbnail uploads
- * 
- * Handles thumbnail uploads for videos and live classes to S3
+ * Object storage service for handling thumbnail uploads
+ *
+ * Talks to Cloudflare R2 (S3-compatible) when R2_* variables are set,
+ * otherwise falls back to AWS S3 via the legacy AWS_* variables.
+ * Handles thumbnail uploads for videos and live classes
  * Returns public URLs that can be stored in database
  * Supports SVG with automatic sanitization for security
  */
 
-// Configure AWS
-AWS.config.update({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION
+const accessKeyId = process.env.R2_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+const secretAccessKey = process.env.R2_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+const bucket = process.env.R2_BUCKET || process.env.AWS_S3_BUCKET;
+const r2Endpoint = process.env.R2_ENDPOINT
+  || (process.env.R2_ACCOUNT_ID ? `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : null);
+const publicBaseUrl = (process.env.R2_PUBLIC_URL || '').replace(/\/+$/, '');
+const usingR2 = Boolean(r2Endpoint);
+
+const s3 = new AWS.S3({
+  accessKeyId,
+  secretAccessKey,
+  region: usingR2 ? 'auto' : process.env.AWS_REGION,
+  ...(usingR2 && {
+    endpoint: r2Endpoint,
+    s3ForcePathStyle: true,
+    signatureVersion: 'v4'
+  })
 });
 
-const s3 = new AWS.S3();
+const isStorageConfigured = () => Boolean(accessKeyId && secretAccessKey && bucket);
+
+/**
+ * R2's S3 endpoint is private, so the URL returned by the SDK cannot be opened
+ * in a browser. When R2_PUBLIC_URL is set (r2.dev subdomain or custom domain),
+ * public URLs are built from it instead.
+ */
+const buildPublicUrl = (key, sdkLocation) => {
+  if (publicBaseUrl) return `${publicBaseUrl}/${key}`;
+  if (usingR2) console.warn('[Storage] R2_PUBLIC_URL is not set - returned URLs are not publicly readable');
+  return sdkLocation;
+};
 
 /**
  * Multer configuration for S3 uploads
@@ -27,10 +52,9 @@ const s3 = new AWS.S3();
  * Profile pictures stored in upload/profiles/
  * SVG files are automatically sanitized before upload
  */
-const uploadToS3 = multer({
-  storage: multerS3({
+const s3Storage = !bucket ? null : multerS3({
     s3: s3,
-    bucket: process.env.AWS_S3_BUCKET,
+    bucket,
     contentType: multerS3.AUTO_CONTENT_TYPE,
     key: function (req, file, cb) {
       // Generate unique filename
@@ -48,7 +72,20 @@ const uploadToS3 = multer({
     metadata: function (req, file, cb) {
       cb(null, { fieldName: file.fieldname });
     }
-  }),
+  });
+
+if (s3Storage) {
+  const handleS3File = s3Storage._handleFile.bind(s3Storage);
+  s3Storage._handleFile = (req, file, cb) => {
+    handleS3File(req, file, (err, info) => {
+      if (info) info.location = buildPublicUrl(info.key, info.location);
+      cb(err, info);
+    });
+  };
+}
+
+const uploadToS3 = !s3Storage ? null : multer({
+  storage: s3Storage,
   // File size limit (5MB)
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB
@@ -109,7 +146,7 @@ const uploadFileToS3 = async (fileBuffer, fileName, contentType, folder = 'photo
     }
     
     const params = {
-      Bucket: process.env.AWS_S3_BUCKET,
+      Bucket: bucket,
       Key: key,
       Body: uploadBuffer,
       ContentType: contentType
@@ -119,7 +156,7 @@ const uploadFileToS3 = async (fileBuffer, fileName, contentType, folder = 'photo
     
     return {
       success: true,
-      url: result.Location,
+      url: buildPublicUrl(result.Key, result.Location),
       key: result.Key,
       bucket: result.Bucket
     };
@@ -134,12 +171,16 @@ const uploadFileToS3 = async (fileBuffer, fileName, contentType, folder = 'photo
  */
 const deleteFileFromS3 = async (fileUrl) => {
   try {
-    // Extract key from URL
-    const url = new URL(fileUrl);
-    const key = url.pathname.substring(1); // Remove leading slash
-    
+    let key;
+    if (publicBaseUrl && fileUrl.startsWith(`${publicBaseUrl}/`)) {
+      key = decodeURIComponent(fileUrl.slice(publicBaseUrl.length + 1));
+    } else {
+      key = decodeURIComponent(new URL(fileUrl).pathname.substring(1));
+      if (key.startsWith(`${bucket}/`)) key = key.slice(bucket.length + 1);
+    }
+
     const params = {
-      Bucket: process.env.AWS_S3_BUCKET,
+      Bucket: bucket,
       Key: key
     };
     
@@ -161,7 +202,7 @@ const deleteFileFromS3 = async (fileUrl) => {
 const getSignedUrl = (key, expiresIn = 3600) => {
   try {
     const params = {
-      Bucket: process.env.AWS_S3_BUCKET,
+      Bucket: bucket,
       Key: key,
       Expires: expiresIn // seconds
     };
@@ -177,15 +218,12 @@ const getSignedUrl = (key, expiresIn = 3600) => {
  * Check if S3 is properly configured
  */
 const validateS3Configuration = () => {
-  const requiredEnvVars = [
-    'AWS_ACCESS_KEY_ID',
-    'AWS_SECRET_ACCESS_KEY',
-    'AWS_REGION',
-    'AWS_S3_BUCKET'
-  ];
-  
-  const missing = requiredEnvVars.filter(envVar => !process.env[envVar]);
-  
+  const missing = [];
+  if (!accessKeyId) missing.push('R2_ACCESS_KEY_ID');
+  if (!secretAccessKey) missing.push('R2_SECRET_ACCESS_KEY');
+  if (!bucket) missing.push('R2_BUCKET');
+  if (!usingR2 && !process.env.AWS_REGION) missing.push('R2_ENDPOINT (or AWS_REGION for AWS S3)');
+
   if (missing.length > 0) {
     return {
       valid: false,
@@ -196,9 +234,10 @@ const validateS3Configuration = () => {
   
   return {
     valid: true,
-    message: 'S3 configuration is valid',
-    bucket: process.env.AWS_S3_BUCKET,
-    region: process.env.AWS_REGION
+    message: 'Storage configuration is valid',
+    provider: usingR2 ? 'cloudflare-r2' : 'aws-s3',
+    bucket,
+    publicUrlConfigured: Boolean(publicBaseUrl)
   };
 };
 
@@ -208,6 +247,9 @@ module.exports = {
   deleteFileFromS3,
   getSignedUrl,
   validateS3Configuration,
+  isStorageConfigured,
+  buildPublicUrl,
+  bucket,
   s3,
   // Export sanitization utilities
   sanitizeSVG,

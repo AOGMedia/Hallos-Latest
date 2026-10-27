@@ -2,7 +2,7 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/db');
 const { Freebie, FreebieItem, FreebieDownload, FreebieAccess } = require('../models/freebieIndex');
 const User = require('../models/User');
-const { uploadFileToS3, deleteFileFromS3, getSignedUrl, s3 } = require('../services/s3Service');
+const { uploadFileToS3, deleteFileFromS3, getSignedUrl, s3, bucket } = require('../services/s3Service');
 const { sendFreebieNewContentEmail } = require('../utils/email');
 
 const ALLOWED_MIME_TYPES = [
@@ -179,7 +179,7 @@ exports.createFreebie = async (req, res) => {
     // Clean up any S3 uploads that succeeded before the error
     for (const key of uploadedKeys) {
       try {
-        await s3.deleteObject({ Bucket: process.env.AWS_S3_BUCKET, Key: key }).promise();
+        await s3.deleteObject({ Bucket: bucket, Key: key }).promise();
       } catch (e) {
         console.error('[Freebies] S3 rollback failed for key:', key, e.message);
       }
@@ -424,7 +424,7 @@ exports.deleteMyFreebie = async (req, res) => {
     for (const item of freebie.items) {
       if (item.itemType === 'file' && item.s3Key) {
         try {
-          await s3.deleteObject({ Bucket: process.env.AWS_S3_BUCKET, Key: item.s3Key }).promise();
+          await s3.deleteObject({ Bucket: bucket, Key: item.s3Key }).promise();
         } catch (e) {
           console.error('[Freebies] S3 delete failed for item:', item.id, e.message);
         }
@@ -463,7 +463,7 @@ exports.deleteFreebie = async (req, res) => {
     for (const item of freebie.items) {
       if (item.itemType === 'file' && item.s3Key) {
         try {
-          await s3.deleteObject({ Bucket: process.env.AWS_S3_BUCKET, Key: item.s3Key }).promise();
+          await s3.deleteObject({ Bucket: bucket, Key: item.s3Key }).promise();
         } catch (e) {
           console.error('[Freebies] S3 delete failed for item:', item.id, e.message);
         }
@@ -499,7 +499,7 @@ exports.deleteItem = async (req, res) => {
 
     if (item.itemType === 'file' && item.s3Key) {
       try {
-        await s3.deleteObject({ Bucket: process.env.AWS_S3_BUCKET, Key: item.s3Key }).promise();
+        await s3.deleteObject({ Bucket: bucket, Key: item.s3Key }).promise();
       } catch (e) {
         console.error('[Freebies] S3 delete failed for item:', item.id, e.message);
       }

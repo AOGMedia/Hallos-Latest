@@ -2,21 +2,21 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Check if S3 is configured
-const useS3 = process.env.AWS_ACCESS_KEY_ID && 
-              process.env.AWS_SECRET_ACCESS_KEY && 
-              process.env.AWS_S3_BUCKET;
+// Check if object storage (R2 or S3) is configured
+const useS3 = (process.env.R2_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID) &&
+              (process.env.R2_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY) &&
+              (process.env.R2_BUCKET || process.env.AWS_S3_BUCKET);
 
 let upload;
 
 if (useS3) {
   // Use S3 storage
-  console.log('✅ Using AWS S3 for file uploads');
+  console.log('✅ Using object storage (R2/S3) for file uploads');
   const { uploadToS3 } = require('../services/s3Service');
   upload = uploadToS3;
 } else {
   // Fallback to local storage
-  console.log('⚠️ AWS S3 not configured, using local storage');
+  console.log('⚠️ Object storage not configured, using local storage');
   
   const uploadPath = 'uploads/';
   
