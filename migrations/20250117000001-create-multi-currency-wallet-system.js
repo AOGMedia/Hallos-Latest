@@ -76,8 +76,10 @@ module.exports = {
       }
     }
 
-    // Create idempotency_keys table
-    await queryInterface.createTable('idempotency_keys', {
+    const existingTables = await queryInterface.showAllTables();
+
+    // Create idempotency_keys table (may already exist via ensurePaymentTables)
+    if (!existingTables.includes('idempotency_keys')) await queryInterface.createTable('idempotency_keys', {
       key: {
         type: Sequelize.UUID,
         primaryKey: true
@@ -231,7 +233,7 @@ module.exports = {
     }
 
     // Create audit_logs table
-    await queryInterface.createTable('audit_logs', {
+    if (!existingTables.includes('audit_logs')) await queryInterface.createTable('audit_logs', {
       id: {
         type: Sequelize.UUID,
         defaultValue: Sequelize.UUIDV4,

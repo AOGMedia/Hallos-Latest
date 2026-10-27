@@ -40,6 +40,7 @@ const campaignRoutes = require('./routes/campaignRoutes');
 const blogRoutes = require('./routes/blogRoutes');
 const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
+const { ensurePaymentTables } = require('./utils/ensurePaymentTables');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -204,6 +205,7 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 8080; 
     
 sequelize.sync({ force: false })
+  .then(() => ensurePaymentTables())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
