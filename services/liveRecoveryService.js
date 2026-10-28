@@ -1,5 +1,5 @@
 /**
- * Live class recovery (ZegoCloud).
+ * Live class recovery (ZegoCloud and GetStream).
  *
  * Problem this solves: a class could be marked 'ended' in the database while
  * its ZegoCloud room was still running (the room is never force-closed —
@@ -21,9 +21,17 @@
 const RECOVERY_WINDOW_MS = 15 * 60 * 1000;
 
 /**
+ * The room the class is running in: its GetStream call for GetStream
+ * classes, its ZegoCloud room otherwise.
+ */
+function currentRoomId(liveClass) {
+  return liveClass.streaming_provider === 'getstream' ? liveClass.getstream_call_id : liveClass.zego_room_id;
+}
+
+/**
  * Pure decision: what should a host heartbeat do to this class?
- * @param {{ status: string, endTime: Date|string|null, zego_room_id: string|null }} liveClass
- * @param {string|undefined} reportedRoomId room the host's client says it is in
+ * @param {{ status: string, endTime: Date|string|null, streaming_provider?: string, zego_room_id?: string|null, getstream_call_id?: string|null }} liveClass
+ * @param {string|undefined} reportedRoomId room (or GetStream call) the host's client says it is in
  * @param {number} now epoch ms
  * @returns {'touch' | 'reopen' | 'none'}
  */
@@ -31,7 +39,8 @@ function decideHeartbeatAction(liveClass, reportedRoomId, now = Date.now()) {
   if (liveClass.status === 'live') return 'touch';
 
   if (liveClass.status !== 'ended') return 'none';
-  if (!reportedRoomId || !liveClass.zego_room_id || reportedRoomId !== liveClass.zego_room_id) return 'none';
+  const roomId = currentRoomId(liveClass);
+  if (!reportedRoomId || !roomId || reportedRoomId !== roomId) return 'none';
   if (!liveClass.endTime) return 'none';
 
   const endedAgo = now - new Date(liveClass.endTime).getTime();

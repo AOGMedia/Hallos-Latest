@@ -19,6 +19,7 @@ const registrationRoutes = require('./routes/registrationRoutes');
 const videoRoutes = require('./routes/videoRoutes');
 const liveRoutes = require('./routes/liveRoutes');
 const zegoCloudRoutes = require('./routes/zegoCloudRoutes');
+const getStreamRoutes = require('./routes/getStreamRoutes');
 const liveSeriesRoutes = require('./routes/liveSeries');
 const userRoutes = require('./routes/userRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
@@ -42,6 +43,7 @@ const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
 const { ensurePaymentTables } = require('./utils/ensurePaymentTables');
 const { ensureLiveIdempotency } = require('./utils/ensureLiveIdempotency');
+const { ensureGetStreamSupport } = require('./utils/ensureGetStreamSupport');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -163,6 +165,7 @@ app.use('/auth', authRateLimiter, passwordResetRoutes); //  Password reset route
 app.use('/register', rateLimiter);
 app.use('/event', registrationRoutes);
 app.use('/live', liveRoutes);
+app.use('/live', getStreamRoutes);
 app.use('/api/live/zegocloud', zegoCloudRoutes);
 app.use('/api/live/series', liveSeriesRoutes);
 app.use('/api/users', userRoutes);
@@ -210,6 +213,9 @@ sequelize.sync({ force: false })
   // Must run before app.listen — the live models declare idempotencyKey,
   // so the column has to exist before the first request touches them.
   .then(() => ensureLiveIdempotency())
+  // Same reason: LiveClass declares getstream_call_id. Never throws — on
+  // failure it disables GetStream and leaves ZegoCloud untouched.
+  .then(() => ensureGetStreamSupport())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
