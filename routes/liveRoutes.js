@@ -14,12 +14,15 @@ router.get('/getLive', liveController.getAllLiveClasses);
 // not be added. Registered before '/:id' so it isn't captured as an id.
 router.get('/create-capabilities', (req, res) => {
   const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
+  const { availableLiveProviders } = require('../utils/liveProviders');
   res.json({
     success: true,
     idempotentCreate: {
       liveClass: isLiveIdempotencyEnabled('live_classes'),
       liveSeries: isLiveIdempotencyEnabled('live_series')
-    }
+    },
+    // Live class providers the create form may offer (ZegoCloud always).
+    providers: availableLiveProviders()
   });
 });
 

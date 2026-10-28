@@ -37,13 +37,16 @@ const LiveClass = sequelize.define('LiveClass', {
   // ZegoCloud fields
   zego_room_id: { type: DataTypes.STRING, allowNull: true },
   zego_app_id: { type: DataTypes.STRING, allowNull: true },
-  streaming_provider: { 
-    type: DataTypes.ENUM('mux', 'zegocloud'), 
+  streaming_provider: {
+    type: DataTypes.ENUM('mux', 'zegocloud', 'getstream'),
     defaultValue: 'zegocloud',
     validate: {
-      isIn: [['mux', 'zegocloud']]
+      isIn: [['mux', 'zegocloud', 'getstream']]
     }
   },
+  // GetStream: id of the class's current call (`<classId>`, then `<classId>-2`
+  // after an ended call is restarted). Added on boot by ensureGetStreamSupport.
+  getstream_call_id: { type: DataTypes.STRING(64), allowNull: true },
   // ❌ REMOVED: zego_room_token - tokens are generated per-request
   max_participants: { 
     type: DataTypes.INTEGER, 
@@ -103,6 +106,10 @@ LiveClass.prototype.isZegoCloudProvider = function() {
 
 LiveClass.prototype.isMuxProvider = function() {
   return this.streaming_provider === 'mux';
+};
+
+LiveClass.prototype.isGetStreamProvider = function() {
+  return this.streaming_provider === 'getstream';
 };
 
 LiveClass.prototype.getStreamingConfig = function() {

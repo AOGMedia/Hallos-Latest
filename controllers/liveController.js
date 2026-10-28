@@ -3,6 +3,7 @@ const muxLiveService = require('../services/muxLiveService');
 const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempotencyKey');
 const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
 const User = require('../models/User');
+const { isGetStreamAvailable } = require('../utils/liveProviders');
 
 // --- HELPER: Centralized Error Handler ---
 // This translates database/code errors into Frontend-friendly messages
@@ -59,6 +60,7 @@ const createdLiveClassResponse = (liveClass, extra = {}) => ({
     // Include helpful info for frontend
     streamingProvider: liveClass.streaming_provider,
     isZegoCloud: liveClass.streaming_provider === 'zegocloud',
+    isGetStream: liveClass.streaming_provider === 'getstream',
     isMux: liveClass.streaming_provider === 'mux',
     pricing: liveClass.getDualPricing()
   }
@@ -79,7 +81,9 @@ const replayLiveClass = async (liveClass, userId) => {
 
 exports.createLiveClass = async (req, res) => {
   try {
-    const { title, description, price, currency, category, thumbnailUrl, startTime, endTime, privacy, streamingProvider = 'mux' } = req.body;
+    // Default to ZegoCloud (in-app streaming). Mux is still accepted when a
+    // client asks for it explicitly, but no client should rely on the default.
+    const { title, description, price, currency, category, thumbnailUrl, startTime, endTime, privacy, streamingProvider = 'zegocloud' } = req.body;
     const userId = req.user.id;
 
     // Survive bad networks: the client sends the same key on every attempt
@@ -112,11 +116,22 @@ exports.createLiveClass = async (req, res) => {
       : 'NGN';
 
     // Validate streaming provider
-    if (!['mux', 'zegocloud'].includes(streamingProvider)) {
-      return res.status(400).json({ success: false, message: "Invalid streaming provider. Must be 'mux' or 'zegocloud'" });
+    if (!['mux', 'zegocloud', 'getstream'].includes(streamingProvider)) {
+      return res.status(400).json({ success: false, message: "Invalid streaming provider. Must be 'mux', 'zegocloud' or 'getstream'" });
+    }
+    if (streamingProvider === 'getstream' && !isGetStreamAvailable()) {
+      return res.status(400).json({ success: false, message: 'GetStream live classes are not available yet. Please choose Stream In-App.' });
     }
 
     let streamingDetails = {};
+
+    if (streamingProvider === 'getstream') {
+      // The call is created when the creator goes live (getStreamService).
+      streamingDetails = {
+        streaming_provider: 'getstream',
+        max_participants: req.body.maxParticipants || 200
+      };
+    }
 
     if (streamingProvider === 'zegocloud') {
       // Step 1b: Prepare for ZegoCloud (room will be created when going live)
@@ -383,6 +398,11 @@ exports.getLiveClassById = async (req, res) => {
         publicInfo.zego_app_id = live.zego_app_id;
         publicInfo.isZegoCloud = true;
         publicInfo.isMux = false;
+      } else if (live.streaming_provider === 'getstream') {
+        // Join credentials come from POST /live/:id/join-getstream.
+        publicInfo.isGetStream = true;
+        publicInfo.isZegoCloud = false;
+        publicInfo.isMux = false;
       } else if (live.streaming_provider === 'mux') {
         publicInfo.mux_stream_id = live.mux_stream_id;
         publicInfo.mux_playback_id = live.mux_playback_id;
@@ -443,6 +463,14 @@ exports.getPlayback = async (req, res) => {
         success: false,
         message: 'ZegoCloud streams use real-time joining. Use /api/live/zegocloud/join-room instead.',
         redirectTo: `/api/live/zegocloud/join-room`,
+        liveClassId: live.id
+      });
+    }
+
+    if (live.streaming_provider === 'getstream') {
+      return res.status(400).json({
+        success: false,
+        message: 'GetStream classes use real-time joining. Use /live/:id/join-getstream instead.',
         liveClassId: live.id
       });
     }
