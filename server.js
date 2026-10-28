@@ -41,6 +41,7 @@ const blogRoutes = require('./routes/blogRoutes');
 const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
 const { ensurePaymentTables } = require('./utils/ensurePaymentTables');
+const { ensureLiveIdempotency } = require('./utils/ensureLiveIdempotency');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -206,6 +207,9 @@ const PORT = process.env.PORT || 8080;
     
 sequelize.sync({ force: false })
   .then(() => ensurePaymentTables())
+  // Must run before app.listen — the live models declare idempotencyKey,
+  // so the column has to exist before the first request touches them.
+  .then(() => ensureLiveIdempotency())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

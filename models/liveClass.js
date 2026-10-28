@@ -64,6 +64,17 @@ const LiveClass = sequelize.define('LiveClass', {
     allowNull: true,
     field: 'community_visibility'
   },
+  // One per client form-submission session, sent on every create attempt
+  // (including retries after a network failure). Lets the controller
+  // detect "I already created this" and return the existing row instead
+  // of inserting a duplicate. Nullable — only enforced unique where set,
+  // via a partial index (see the migration), so it's safe for any caller
+  // that doesn't send one.
+  idempotencyKey: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: 'idempotency_key'
+  },
 
 }, {
   tableName: 'live_classes',

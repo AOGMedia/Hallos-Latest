@@ -2,6 +2,59 @@ const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const liveSeriesService = require('../services/liveSeriesService');
 const User = require('../models/User');
 const { Op } = require('sequelize');
+const sequelize = require('../config/db');
+const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempotencyKey');
+const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
+
+/**
+ * Response body for a created series. Shared by a fresh create and an
+ * idempotent replay so the frontend sees the same shape either way.
+ */
+const createdSeriesResponse = (series, totalSessions, extra = {}) => ({
+  success: true,
+  message: 'Live series created successfully',
+  ...extra,
+  series: {
+    ...series.dataValues,
+    totalSessions,
+    pricing: series.getDualPricing()
+  }
+});
+
+/**
+ * Generate a series' sessions exactly once, returning how many it has.
+ *
+ * On a bad connection a retry can arrive while the first request is still
+ * generating sessions: both see the series, both count zero, both generate —
+ * duplicate sessions. A transaction-scoped advisory lock on the series id
+ * serializes them, and the count is taken inside the lock, so whichever runs
+ * second sees the first one's sessions. The lock is held until the callback
+ * returns, i.e. until the session bulkCreate has finished and committed.
+ *
+ * Zero sessions reliably means "never generated": createSessionsForSeries
+ * writes them in one bulkCreate (a single INSERT — all or none).
+ */
+const ensureSessions = async (series) =>
+  sequelize.transaction(async (t) => {
+    await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:seriesId))', {
+      replacements: { seriesId: String(series.id) },
+      transaction: t
+    });
+    const existingCount = await LiveSession.count({ where: { seriesId: series.id }, transaction: t });
+    if (existingCount > 0) return existingCount;
+    const sessions = await liveSeriesService.createSessionsForSeries(series);
+    return sessions.length;
+  });
+
+/**
+ * A create that repeats an idempotency key returns the series the first
+ * attempt already made — generating its sessions if that attempt died
+ * after inserting the series but before writing them.
+ */
+const replaySeries = async (series) => {
+  const totalSessions = await ensureSessions(series);
+  return createdSeriesResponse(series, totalSessions, { idempotentReplay: true });
+};
 
 /**
  * Create a new live series
@@ -24,7 +77,20 @@ exports.createSeries = async (req, res) => {
     } = req.body;
     
     const userId = req.user.id;
-    
+
+    // Survive bad networks: same key on every attempt for one submission. If
+    // an earlier attempt already created the series (its response was lost),
+    // return it rather than creating a duplicate series and session set.
+    // Checked before validation so a late retry can't be rejected by the
+    // start-date window after the first attempt already succeeded.
+    const idempotencyKey = isLiveIdempotencyEnabled('live_series') ? readIdempotencyKey(req) : null;
+    if (idempotencyKey) {
+      const existing = await LiveSeries.findOne({ where: { idempotencyKey, userId } });
+      if (existing) {
+        return res.status(201).json(await replaySeries(existing));
+      }
+    }
+
     // Parse recurrencePattern if it's a string (from FormData)
     if (typeof recurrencePattern === 'string') {
       try {
@@ -89,36 +155,42 @@ exports.createSeries = async (req, res) => {
       : 'NGN';
     
     // Create series
-    const series = await LiveSeries.create({
-      userId,
-      title,
-      description,
-      price: price || 0,
-      currency: finalCurrency,
-      category,
-      thumbnailUrl: finalThumbnailUrl,
-      startDate: start,
-      endDate: end,
-      recurrencePattern,
-      privacy: privacy || 'public',
-      maxParticipants: maxParticipants || 200,
-      status: 'active'
-    });
-    
-    // Generate and create sessions
-    const sessions = await liveSeriesService.createSessionsForSeries(series);
-    
-    console.log(`[Live Series Controller] Created series ${series.id} with ${sessions.length} sessions`);
-    
-    return res.status(201).json({
-      success: true,
-      message: 'Live series created successfully',
-      series: {
-        ...series.dataValues,
-        totalSessions: sessions.length,
-        pricing: series.getDualPricing()
+    let series;
+    try {
+      series = await LiveSeries.create({
+        userId,
+        title,
+        description,
+        price: price || 0,
+        currency: finalCurrency,
+        category,
+        thumbnailUrl: finalThumbnailUrl,
+        startDate: start,
+        endDate: end,
+        recurrencePattern,
+        privacy: privacy || 'public',
+        maxParticipants: maxParticipants || 200,
+        status: 'active',
+        ...(idempotencyKey ? { idempotencyKey } : {})
+      });
+    } catch (createError) {
+      // Concurrent attempts with the same key: only one insert got through.
+      if (idempotencyKey && isIdempotencyConflict(createError, 'idx_live_series_idempotency_key_unique')) {
+        const existing = await LiveSeries.findOne({ where: { idempotencyKey, userId } });
+        if (existing) {
+          return res.status(201).json(await replaySeries(existing));
+        }
       }
-    });
+      throw createError;
+    }
+
+    // Generate and create sessions (serialized against a concurrent retry —
+    // see ensureSessions)
+    const totalSessions = await ensureSessions(series);
+
+    console.log(`[Live Series Controller] Created series ${series.id} with ${totalSessions} sessions`);
+
+    return res.status(201).json(createdSeriesResponse(series, totalSessions));
 
     // Queue digest notifications in background (fire-and-forget)
     setImmediate(async () => {
@@ -618,7 +690,21 @@ exports.linkLiveSeriesToCommunity = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You must be an active member of this community.' });
     }
 
-    const submission = await CommunityContentSubmission.create({
+    // A retried create (bad network) replays the same series and the client
+    // links it again — reuse the pending submission rather than queueing a
+    // duplicate for the moderators. Only pending ones: after a rejection,
+    // resubmitting is legitimate.
+    const existingSubmission = await CommunityContentSubmission.findOne({
+      where: {
+        communityId,
+        submittedBy: userId,
+        contentType: 'live_series',
+        status: 'pending',
+        contentData: { [Op.contains]: { id: series.id } }
+      }
+    });
+
+    const submission = existingSubmission || await CommunityContentSubmission.create({
       communityId,
       submittedBy: userId,
       contentType: 'live_series',
