@@ -78,7 +78,7 @@ module.exports = {
 
     const existingTables = await queryInterface.showAllTables();
 
-    // Create idempotency_keys table (may already exist via ensurePaymentTables)
+    // Create idempotency_keys table (may already exist via ensureSupportTables)
     if (!existingTables.includes('idempotency_keys')) await queryInterface.createTable('idempotency_keys', {
       key: {
         type: Sequelize.UUID,
