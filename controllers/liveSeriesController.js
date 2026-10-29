@@ -5,6 +5,15 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/db');
 const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempotencyKey');
 const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
+const { resolveSeriesProvider, seriesProviderOf } = require('../utils/liveProviders');
+const { withAvatar } = require('../utils/userAvatar');
+
+/** The series creator with avatarUrl (and without the socialLinks loaded to read it). */
+const creatorWithAvatar = (series) => {
+  const creator = series.creator || (series.dataValues && series.dataValues.creator);
+  if (!creator) return creator;
+  return withAvatar(typeof creator.toJSON === 'function' ? creator.toJSON() : creator);
+};
 
 /**
  * Response body for a created series. Shared by a fresh create and an
@@ -73,9 +82,10 @@ exports.createSeries = async (req, res) => {
       endDate,
       recurrencePattern,
       privacy,
-      maxParticipants
+      maxParticipants,
+      streamingProvider
     } = req.body;
-    
+
     const userId = req.user.id;
 
     // Survive bad networks: same key on every attempt for one submission. If
@@ -109,6 +119,12 @@ exports.createSeries = async (req, res) => {
         success: false,
         message: 'Title, start date, end date, and recurrence pattern are required'
       });
+    }
+
+    // Provider for every session of the series (defaults to ZegoCloud).
+    const providerChoice = resolveSeriesProvider(streamingProvider);
+    if (providerChoice.error) {
+      return res.status(400).json({ success: false, message: providerChoice.error });
     }
     
     // Validate recurrence pattern
@@ -171,6 +187,9 @@ exports.createSeries = async (req, res) => {
         privacy: privacy || 'public',
         maxParticipants: maxParticipants || 200,
         status: 'active',
+        // Only set when GetStream is picked, so a series is created exactly
+        // as before when the column isn't available (see ensureGetStreamSupport).
+        ...(providerChoice.provider !== 'zegocloud' ? { streamingProvider: providerChoice.provider } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {})
       });
     } catch (createError) {
@@ -248,7 +267,8 @@ exports.getAllSeries = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -259,18 +279,19 @@ exports.getAllSeries = async (req, res) => {
         const stats = await liveSeriesService.calculateSeriesStats(s.id);
         return {
           ...s.dataValues,
+          creator: creatorWithAvatar(s),
           stats,
           pricing: s.getDualPricing()
         };
       })
     );
-    
+
     return res.json({
       success: true,
       count: seriesWithStats.length,
       series: seriesWithStats
     });
-    
+
   } catch (error) {
     console.error('[Live Series Controller] Get all series error:', error);
     return res.status(500).json({
@@ -302,7 +323,8 @@ exports.getMySeries = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -313,18 +335,19 @@ exports.getMySeries = async (req, res) => {
         const stats = await liveSeriesService.calculateSeriesStats(s.id);
         return {
           ...s.dataValues,
+          creator: creatorWithAvatar(s),
           stats,
           pricing: s.getDualPricing()
         };
       })
     );
-    
+
     return res.json({
       success: true,
       count: seriesWithStats.length,
       series: seriesWithStats
     });
-    
+
   } catch (error) {
     console.error('[Live Series Controller] Get my series error:', error);
     return res.status(500).json({
@@ -347,7 +370,8 @@ exports.getSeriesById = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -402,6 +426,7 @@ exports.getSeriesById = async (req, res) => {
       success: true,
       series: {
         ...series.dataValues,
+        creator: creatorWithAvatar(series),
         stats,
         hasAccess,
         accessReason,
@@ -478,9 +503,10 @@ exports.updateSeries = async (req, res) => {
       thumbnailUrl,
       privacy,
       maxParticipants,
-      endDate
+      endDate,
+      streamingProvider
     } = req.body;
-    
+
     // Get series
     const series = await LiveSeries.findByPk(id);
     if (!series) {
@@ -513,7 +539,24 @@ exports.updateSeries = async (req, res) => {
     if (finalThumbnailUrl) updates.thumbnailUrl = finalThumbnailUrl;
     if (privacy) updates.privacy = privacy;
     if (maxParticipants) updates.maxParticipants = maxParticipants;
-    
+
+    // Switching provider applies to sessions that haven't started yet. Not
+    // while a session is live: its attendees are on the current provider.
+    if (streamingProvider && streamingProvider !== seriesProviderOf(series)) {
+      const providerChoice = resolveSeriesProvider(streamingProvider);
+      if (providerChoice.error) {
+        return res.status(400).json({ success: false, message: providerChoice.error });
+      }
+      const liveCount = await LiveSession.count({ where: { seriesId: series.id, status: 'live' } });
+      if (liveCount > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'End the live session before changing the streaming method'
+        });
+      }
+      updates.streamingProvider = providerChoice.provider;
+    }
+
     // Handle end date extension
     let newSessionsGenerated = 0;
     if (endDate) {

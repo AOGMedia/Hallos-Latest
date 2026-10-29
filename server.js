@@ -20,6 +20,7 @@ const videoRoutes = require('./routes/videoRoutes');
 const liveRoutes = require('./routes/liveRoutes');
 const zegoCloudRoutes = require('./routes/zegoCloudRoutes');
 const getStreamRoutes = require('./routes/getStreamRoutes');
+const getStreamSeriesRoutes = require('./routes/getStreamSeriesRoutes');
 const liveSeriesRoutes = require('./routes/liveSeries');
 const userRoutes = require('./routes/userRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
@@ -168,6 +169,7 @@ app.use('/live', liveRoutes);
 app.use('/live', getStreamRoutes);
 app.use('/api/live/zegocloud', zegoCloudRoutes);
 app.use('/api/live/series', liveSeriesRoutes);
+app.use('/api/live/series', getStreamSeriesRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payments', financialRateLimiter, paymentRoutes);
 app.use('/api/wallet', financialRateLimiter, walletRoutes);
@@ -246,6 +248,13 @@ sequelize.sync({ force: false })
       setupLiveClassCleanup();
       setupEmailScheduler();
       setupQuizScheduledTasks();
+
+      // Removes chat photos of GetStream classes/sessions that have ended.
+      try {
+        require('./services/liveChatMediaService').startChatMediaSweeper();
+      } catch (err) {
+        console.error('❌ Failed to start live chat media sweeper:', err.message);
+      }
     });
   })
   .catch(err => console.error('DB Connection Failed:', err));

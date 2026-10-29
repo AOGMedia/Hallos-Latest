@@ -34,6 +34,10 @@ function mockCall(id) {
   return mockCalls.get(id);
 }
 
+jest.mock('../services/liveChatMediaService', () => ({
+  deleteChatMedia: jest.fn().mockResolvedValue(0)
+}));
+
 jest.mock('@stream-io/node-sdk', () => ({
   StreamClient: jest.fn().mockImplementation(() => ({
     upsertUsers: mockUpsertUsers,
@@ -175,6 +179,95 @@ describe('recordings', () => {
     const lc = fakeClass({ status: 'ended', getstream_call_id: `${CLASS_ID}-2` });
     const recordings = await getStreamService.listRecordings(lc);
     expect(recordings.map((r) => r.session).sort()).toEqual([1, 2]);
+  });
+});
+
+describe('series sessions', () => {
+  const SESSION_ID = '5a5a5a5a-1111-4222-8333-944455556666';
+  const series = { id: 'series-1', maxParticipants: 30, title: 'Series' };
+
+  function fakeSession(overrides = {}) {
+    const s = {
+      id: SESSION_ID,
+      sessionNumber: 4,
+      status: 'scheduled',
+      update: jest.fn(async (fields) => Object.assign(s, fields)),
+      ...overrides
+    };
+    return s;
+  }
+
+  test('starting a scheduled session opens a call named after the session and goes live', async () => {
+    const session = fakeSession();
+    const result = await getStreamService.startSeriesSession(session, series, host);
+
+    expect(result.callId).toBe(SESSION_ID);
+    expect(result.alreadyLive).toBe(false);
+    expect(session.status).toBe('live');
+    expect(session.actualStartTime).toBeInstanceOf(Date);
+    const created = mockCall(SESSION_ID).getOrCreate.mock.calls[0][0].data;
+    expect(created.settings_override.limits.max_participants).toBe(30);
+    expect(created.custom).toEqual({ live_series_id: 'series-1', live_session_id: SESSION_ID });
+  });
+
+  test('starting a live session again just returns fresh host credentials', async () => {
+    const session = fakeSession({ status: 'live' });
+    const result = await getStreamService.startSeriesSession(session, series, host);
+    expect(result.alreadyLive).toBe(true);
+    expect(session.update).not.toHaveBeenCalled();
+    expect(mockCall(SESSION_ID).getOrCreate).not.toHaveBeenCalled();
+  });
+
+  test('an ended session cannot be restarted (same rule as ZegoCloud)', async () => {
+    await expect(
+      getStreamService.startSeriesSession(fakeSession({ status: 'ended' }), series, host)
+    ).rejects.toMatchObject({ status: 400, code: 'SESSION_NOT_STARTABLE' });
+  });
+
+  test('joining needs a live session; participants get a user-role token for that call only', async () => {
+    await expect(
+      getStreamService.joinSeriesSession(fakeSession(), viewer, { isHost: false })
+    ).rejects.toMatchObject({ status: 400 });
+
+    const creds = await getStreamService.joinSeriesSession(fakeSession({ status: 'live' }), viewer, { isHost: false });
+    expect(creds.callId).toBe(SESSION_ID);
+    expect(mockGenerateCallToken).toHaveBeenLastCalledWith(
+      expect.objectContaining({ user_id: '9', role: 'user', call_cids: [`default:${SESSION_ID}`] })
+    );
+  });
+
+  test('ending ends the call and the session', async () => {
+    const session = fakeSession({ status: 'live' });
+    await getStreamService.endSeriesSession(session);
+    expect(mockCall(SESSION_ID).end).toHaveBeenCalled();
+    expect(session.status).toBe('ended');
+    expect(session.actualEndTime).toBeInstanceOf(Date);
+  });
+
+  test('recordings are listed for the session\'s call', async () => {
+    mockCall(SESSION_ID).state.created = true;
+    const recordings = await getStreamService.listSeriesSessionRecordings(fakeSession({ status: 'ended' }));
+    expect(recordings).toHaveLength(1);
+    expect(recordings[0].session).toBe(4);
+  });
+});
+
+describe('series provider choice', () => {
+  const { seriesProviderOf, resolveSeriesProvider } = require('../utils/liveProviders');
+
+  test('series created before the choice existed are ZegoCloud', () => {
+    expect(seriesProviderOf({})).toBe('zegocloud');
+    expect(seriesProviderOf({ streamingProvider: 'getstream' })).toBe('getstream');
+  });
+
+  test('defaults to ZegoCloud and rejects unknown providers', () => {
+    expect(resolveSeriesProvider(undefined)).toEqual({ provider: 'zegocloud' });
+    expect(resolveSeriesProvider('mux').error).toMatch(/Invalid streaming provider/);
+  });
+
+  test('GetStream is refused until its schema is ready', () => {
+    // ensureGetStreamSupport hasn't run in tests, so the series column isn't verified.
+    expect(resolveSeriesProvider('getstream').error).toMatch(/not available yet/);
   });
 });
 

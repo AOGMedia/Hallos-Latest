@@ -64,33 +64,146 @@ const isNotFound = (error) => error && (error.code === 16 || error.status === 40
 
 const upsertUser = async (user) => {
   const name = user ? `${user.firstname || ''} ${user.lastname || ''}`.trim() : '';
-  await getClient().upsertUsers([{ id: streamUserId(user.id), name: name || `User ${user.id}` }]);
+  // Their profile picture shows on their tile (camera off), in chat and the
+  // people list. Only absolute https URLs — other people's browsers load it.
+  const avatar = require('../utils/userAvatar').avatarUrlOf(user);
+  await getClient().upsertUsers([
+    {
+      id: streamUserId(user.id),
+      name: name || `User ${user.id}`,
+      ...(avatar && /^https:\/\//i.test(avatar) ? { image: avatar } : {})
+    }
+  ]);
 };
+
+// ---------------------------------------------------------------------------
+// Call-level building blocks, shared by live classes and series sessions.
+// ---------------------------------------------------------------------------
+
+/**
+ * Get or create a call with the creator as host and recording available.
+ * @returns {Promise<boolean>} whether the call has already been ended
+ */
+const openCall = async (callId, creator, { maxParticipants, custom }) => {
+  const response = await getClient().video.call(CALL_TYPE, callId).getOrCreate({
+    data: {
+      created_by_id: streamUserId(creator.id),
+      members: [{ user_id: streamUserId(creator.id), role: HOST_CALL_ROLE }],
+      custom,
+      settings_override: {
+        recording: { mode: 'available', quality: '720p' },
+        ...(maxParticipants ? { limits: { max_participants: maxParticipants } } : {})
+      }
+    }
+  });
+  return Boolean(response.call && response.call.ended_at);
+};
+
+/** Give someone host rights inside a call (co-hosts). */
+const promoteToHost = (callId, userId) =>
+  getClient().video.call(CALL_TYPE, callId).updateCallMembers({
+    update_members: [{ user_id: streamUserId(userId), role: HOST_CALL_ROLE }]
+  });
+
+/** End a call for everyone; also stops any recording. Missing/ended calls are fine. */
+const endCall = async (callId) => {
+  try {
+    await getClient().video.call(CALL_TYPE, callId).end();
+  } catch (error) {
+    if (!isNotFound(error) && !/ended/i.test(error.message || '')) throw error;
+  }
+};
+
+/** Start or stop a call's composite recording, with clear errors for the usual states. */
+const recordCall = async (callId, action) => {
+  const call = getClient().video.call(CALL_TYPE, callId);
+  try {
+    if (action === 'start') {
+      await call.startRecording({ recording_type: RECORDING_TYPE });
+    } else {
+      await call.stopRecording({ recording_type: RECORDING_TYPE });
+    }
+  } catch (error) {
+    const message = error.message || '';
+    // GetStream records the call's media, so someone has to be connected.
+    if (/no active session/i.test(message)) {
+      throw new GetStreamError('Recording can start once you are connected to the class', 'NO_ACTIVE_SESSION', 409);
+    }
+    if (/already/i.test(message)) {
+      throw new GetStreamError('Recording is already running', 'RECORDING_STATE', 409);
+    }
+    if (/egress is not running|not (being )?record/i.test(message)) {
+      throw new GetStreamError('Recording is not running', 'RECORDING_STATE', 409);
+    }
+    throw error;
+  }
+  return { recording: action === 'start' };
+};
+
+/** A call's recordings (none if the call was never created). */
+const recordingsOfCall = async (callId, session) => {
+  try {
+    const response = await getClient().video.call(CALL_TYPE, callId).listRecordings();
+    return (response.recordings || []).map((rec) => ({
+      session,
+      callId,
+      filename: rec.filename,
+      url: rec.url,
+      startTime: rec.start_time,
+      endTime: rec.end_time
+    }));
+  } catch (error) {
+    if (isNotFound(error)) return [];
+    throw error;
+  }
+};
+
+const newestFirst = (recordings) => recordings.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+
+/**
+ * Server announcements in a call (gifts, chat photos) come from this user.
+ * Browsers only trust those event kinds from it, and no attendee can send as
+ * it (their tokens are tied to their own user id).
+ */
+const SYSTEM_USER_ID = 'hallos-system';
+let systemUserReady = false;
+
+/** Send a custom event into a call as the Hallos system user. */
+const broadcastSystemEvent = async (callId, custom) => {
+  if (!systemUserReady) {
+    await getClient().upsertUsers([{ id: SYSTEM_USER_ID, name: 'Hallos' }]);
+    systemUserReady = true;
+  }
+  await getClient().video.call(CALL_TYPE, callId).sendCallEvent({ user_id: SYSTEM_USER_ID, custom });
+};
+
+/** Drop a finished class's/session's chat photos, without delaying the response. */
+const cleanUpChatMediaLater = (target) => {
+  const media = require('./liveChatMediaService');
+  setImmediate(() => {
+    media.deleteChatMedia(target).catch(() => {});
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Live classes
+// ---------------------------------------------------------------------------
 
 /**
  * Get or create the call for the class's current session. If that call was
  * ended (a deliberate "end class"), move on to the next session's call.
  */
 const ensureActiveCall = async (liveClass, creator) => {
-  const video = getClient().video;
   let sessionNumber = sessionNumberOf(liveClass.id, liveClass.getstream_call_id);
 
   // Bounded: one step past an ended call is always a fresh one.
   for (let attempt = 0; attempt < 3; attempt++) {
     const callId = callIdFor(liveClass.id, sessionNumber);
-    const call = video.call(CALL_TYPE, callId);
-    const response = await call.getOrCreate({
-      data: {
-        created_by_id: streamUserId(creator.id),
-        members: [{ user_id: streamUserId(creator.id), role: HOST_CALL_ROLE }],
-        custom: { live_class_id: String(liveClass.id) },
-        settings_override: {
-          recording: { mode: 'available', quality: '720p' },
-          ...(liveClass.max_participants ? { limits: { max_participants: liveClass.max_participants } } : {})
-        }
-      }
+    const ended = await openCall(callId, creator, {
+      maxParticipants: liveClass.max_participants,
+      custom: { live_class_id: String(liveClass.id) }
     });
-    if (!response.call || !response.call.ended_at) return callId;
+    if (!ended) return callId;
     sessionNumber += 1;
   }
   throw new GetStreamError('Could not open a new GetStream call', 'CALL_CREATE_FAILED', 502);
@@ -134,27 +247,17 @@ const joinSession = async (liveClass, user, { isHost }) => {
     throw new GetStreamError('Live class is not currently active', 'SESSION_NOT_ACTIVE', 400);
   }
   await upsertUser(user);
-  if (isHost) {
-    await getClient().video.call(CALL_TYPE, liveClass.getstream_call_id).updateCallMembers({
-      update_members: [{ user_id: streamUserId(user.id), role: HOST_CALL_ROLE }]
-    });
-  }
+  if (isHost) await promoteToHost(liveClass.getstream_call_id, user.id);
   return credentialsFor(liveClass.getstream_call_id, user.id, isHost);
 };
 
 /** End the class for everyone. Ending the call also stops any recording. */
 const endSession = async (liveClass) => {
-  if (liveClass.getstream_call_id) {
-    try {
-      await getClient().video.call(CALL_TYPE, liveClass.getstream_call_id).end();
-    } catch (error) {
-      // Already ended or never created: the class still ends.
-      if (!isNotFound(error) && !/ended/i.test(error.message || '')) throw error;
-    }
-  }
+  if (liveClass.getstream_call_id) await endCall(liveClass.getstream_call_id);
   if (liveClass.status === 'live') {
     await liveClass.update({ status: 'ended', endTime: new Date() });
   }
+  cleanUpChatMediaLater({ kind: 'class', id: liveClass.id });
   console.log(`[GetStream] Live session ended: ${liveClass.id}`);
   return { liveClassId: liveClass.id, endedAt: new Date() };
 };
@@ -164,28 +267,7 @@ const setRecording = async (liveClass, action) => {
   if (liveClass.status !== 'live' || !liveClass.getstream_call_id) {
     throw new GetStreamError('Live class is not currently active', 'SESSION_NOT_ACTIVE', 400);
   }
-  const call = getClient().video.call(CALL_TYPE, liveClass.getstream_call_id);
-  try {
-    if (action === 'start') {
-      await call.startRecording({ recording_type: RECORDING_TYPE });
-    } else {
-      await call.stopRecording({ recording_type: RECORDING_TYPE });
-    }
-  } catch (error) {
-    const message = error.message || '';
-    // GetStream records the call's media, so someone has to be connected.
-    if (/no active session/i.test(message)) {
-      throw new GetStreamError('Recording can start once you are connected to the class', 'NO_ACTIVE_SESSION', 409);
-    }
-    if (/already/i.test(message)) {
-      throw new GetStreamError('Recording is already running', 'RECORDING_STATE', 409);
-    }
-    if (/egress is not running|not (being )?record/i.test(message)) {
-      throw new GetStreamError('Recording is not running', 'RECORDING_STATE', 409);
-    }
-    throw error;
-  }
-  return { recording: action === 'start' };
+  return recordCall(liveClass.getstream_call_id, action);
 };
 
 /**
@@ -193,31 +275,70 @@ const setRecording = async (liveClass, action) => {
  * signed by GetStream and expire, so they're fetched fresh on each request.
  */
 const listRecordings = async (liveClass) => {
-  const video = getClient().video;
   const lastSession = sessionNumberOf(liveClass.id, liveClass.getstream_call_id);
   const recordings = [];
-
   for (let session = 1; session <= lastSession; session++) {
-    const callId = callIdFor(liveClass.id, session);
-    try {
-      const response = await video.call(CALL_TYPE, callId).listRecordings();
-      for (const rec of response.recordings || []) {
-        recordings.push({
-          session,
-          callId,
-          filename: rec.filename,
-          url: rec.url,
-          startTime: rec.start_time,
-          endTime: rec.end_time
-        });
-      }
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-    }
+    recordings.push(...(await recordingsOfCall(callIdFor(liveClass.id, session), session)));
+  }
+  return newestFirst(recordings);
+};
+
+// ---------------------------------------------------------------------------
+// Live series sessions
+//
+// Each series session is its own call, id = the session id. Like ZegoCloud
+// series sessions, a session runs once: scheduled -> live -> ended.
+// ---------------------------------------------------------------------------
+
+const SESSION_NOT_LIVE = 'Session is not currently live or room not available';
+
+/** Creator starts (or rejoins) a series session. Safe to repeat while live. */
+const startSeriesSession = async (session, series, creator) => {
+  await upsertUser(creator);
+  const callId = String(session.id);
+
+  if (session.status === 'live') {
+    return { alreadyLive: true, ...credentialsFor(callId, creator.id, true) };
+  }
+  if (session.status !== 'scheduled') {
+    // Same rule and wording as the ZegoCloud session start.
+    throw new GetStreamError(`Session cannot be started. Current status: ${session.status}`, 'SESSION_NOT_STARTABLE', 400);
   }
 
-  return recordings.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+  await openCall(callId, creator, {
+    maxParticipants: series.maxParticipants,
+    custom: { live_series_id: String(series.id), live_session_id: callId }
+  });
+  await session.update({ status: 'live', actualStartTime: new Date() });
+  console.log(`[GetStream] Series session started: ${session.id} (series ${series.id})`);
+  return { alreadyLive: false, ...credentialsFor(callId, creator.id, true) };
 };
+
+/** A participant joins a live series session. */
+const joinSeriesSession = async (session, user, { isHost }) => {
+  if (session.status !== 'live') throw new GetStreamError(SESSION_NOT_LIVE, 'SESSION_NOT_ACTIVE', 400);
+  await upsertUser(user);
+  return credentialsFor(String(session.id), user.id, isHost);
+};
+
+/** End a series session for everyone. */
+const endSeriesSession = async (session) => {
+  await endCall(String(session.id));
+  if (session.status === 'live') {
+    await session.update({ status: 'ended', actualEndTime: new Date() });
+  }
+  cleanUpChatMediaLater({ kind: 'session', id: session.id });
+  console.log(`[GetStream] Series session ended: ${session.id}`);
+  return { sessionId: session.id, endedAt: new Date() };
+};
+
+const setSeriesSessionRecording = async (session, action) => {
+  if (session.status !== 'live') throw new GetStreamError(SESSION_NOT_LIVE, 'SESSION_NOT_ACTIVE', 400);
+  return recordCall(String(session.id), action);
+};
+
+const listSeriesSessionRecordings = async (session) =>
+  newestFirst(await recordingsOfCall(String(session.id), session.sessionNumber || 1));
 
 module.exports = {
   getStreamService: {
@@ -226,8 +347,15 @@ module.exports = {
     joinSession,
     endSession,
     setRecording,
-    listRecordings
+    listRecordings,
+    startSeriesSession,
+    joinSeriesSession,
+    endSeriesSession,
+    setSeriesSessionRecording,
+    listSeriesSessionRecordings,
+    broadcastSystemEvent
   },
+  SYSTEM_USER_ID,
   GetStreamError,
   // Exported for tests.
   callIdFor,

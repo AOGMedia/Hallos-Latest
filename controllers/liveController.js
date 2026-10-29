@@ -4,6 +4,19 @@ const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempote
 const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
 const User = require('../models/User');
 const { isGetStreamAvailable } = require('../utils/liveProviders');
+const { avatarUrlOf, withAvatar } = require('../utils/userAvatar');
+
+/**
+ * A listed class with each host's profile picture (hosts[].User.avatarUrl)
+ * and the creator's as creatorAvatarUrl. The socialLinks loaded to read the
+ * picture are not returned.
+ */
+const withHostAvatars = (classData) => {
+  if (!Array.isArray(classData.hosts)) return classData;
+  const hosts = classData.hosts.map((h) => (h && h.User ? { ...h, User: withAvatar(h.User) } : h));
+  const creatorHost = hosts.find((h) => h && h.role === 'creator') || hosts[0];
+  return { ...classData, hosts, creatorAvatarUrl: (creatorHost && creatorHost.User && creatorHost.User.avatarUrl) || null };
+};
 
 // --- HELPER: Centralized Error Handler ---
 // This translates database/code errors into Frontend-friendly messages
@@ -258,7 +271,8 @@ exports.getLiveClassById = async (req, res) => {
       include: [{
         model: User,
         as: 'creator',
-        attributes: ['id', 'firstname', 'lastname', 'email']
+        // socialLinks only to read the profile picture (not returned).
+        attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
       }]
     });
     
@@ -377,7 +391,8 @@ exports.getLiveClassById = async (req, res) => {
         id: live.creator.id,
         name: `${live.creator.firstname} ${live.creator.lastname}`.trim(),
         firstname: live.creator.firstname,
-        lastname: live.creator.lastname
+        lastname: live.creator.lastname,
+        avatarUrl: avatarUrlOf(live.creator)
       } : null,
       // Access flags
       hasAccess,
@@ -710,16 +725,16 @@ exports.getAllLiveClasses = async (req, res) => {
         {
           model: LiveHost,
           as: 'hosts',
-          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email'] }]
+          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks'] }]
         }
       ]
     });
 
-    // Add dual pricing to each live class
+    // Add dual pricing (and host pictures) to each live class
     const liveClassesWithPricing = liveClasses.map(liveClass => {
       const classData = liveClass.toJSON();
       classData.pricing = liveClass.getDualPricing();
-      return classData;
+      return withHostAvatars(classData);
     });
 
     return res.json({
@@ -768,16 +783,16 @@ exports.getMyLiveClasses = async (req, res) => {
         {
           model: LiveHost,
           as: 'hosts',
-          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email'] }]
+          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks'] }]
         }
       ]
     });
 
-    // Add dual pricing to each live class
+    // Add dual pricing (and host pictures) to each live class
     const liveClassesWithPricing = liveClasses.map(liveClass => {
       const classData = liveClass.toJSON();
       classData.pricing = liveClass.getDualPricing();
-      return classData;
+      return withHostAvatars(classData);
     });
 
     return res.json({ 
