@@ -27,6 +27,16 @@ const googleStrategy = new GoogleStrategy({
       // await user.update({ firstname: ..., lastname: ... });
     }
 
+    // Use their Google photo as the profile picture if they don't have one
+    // yet. In the background: never slows down or blocks signing in.
+    const photoUrl = profile.photos && profile.photos[0] && profile.photos[0].value;
+    if (photoUrl) {
+      const userId = user.id;
+      setImmediate(() => {
+        require('./oauthAvatarService').importGooglePhoto(userId, photoUrl).catch(() => {});
+      });
+    }
+
     // done(null, user) passes the user object to serializeUser
     return done(null, user);
   } catch (err) {

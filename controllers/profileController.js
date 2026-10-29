@@ -1,5 +1,6 @@
 const User = require('../models/User');
 const bcrypt = require('bcryptjs');
+const { avatarUrlOf } = require('../utils/userAvatar');
 const { upload } = require('../utils/multerConfig');
 
 /**
@@ -46,7 +47,7 @@ exports.getProfile = async (req, res) => {
 
     return res.json({
       success: true,
-      profile: user
+      profile: { ...user.toJSON(), avatarUrl: avatarUrlOf(user) }
     });
   } catch (error) {
     console.error('[Profile Controller] Get profile error:', error);
@@ -99,7 +100,15 @@ exports.updateProfile = async (req, res) => {
         
         // Validate it's an object
         if (typeof parsedLinks === 'object' && parsedLinks !== null) {
-          updates.socialLinks = parsedLinks;
+          // The profile picture lives here too but is only changed through
+          // POST /api/profile/picture — keep it when a form omits it.
+          const current = user.socialLinks || {};
+          const kept = {};
+          if (current.profilePicture && parsedLinks.profilePicture === undefined) kept.profilePicture = current.profilePicture;
+          if (current.profilePictureSource && parsedLinks.profilePictureSource === undefined) {
+            kept.profilePictureSource = current.profilePictureSource;
+          }
+          updates.socialLinks = { ...parsedLinks, ...kept };
         }
       } catch (error) {
         return res.status(400).json({
@@ -124,7 +133,8 @@ exports.updateProfile = async (req, res) => {
         country: user.country,
         bio: user.bio,
         socialLinks: user.socialLinks,
-        newsletterSubscribed: user.newsletterSubscribed
+        newsletterSubscribed: user.newsletterSubscribed,
+        avatarUrl: avatarUrlOf(user)
       }
     });
   } catch (error) {
@@ -166,17 +176,16 @@ exports.updateProfilePicture = async (req, res) => {
     // Get S3 URL or local path
     const profilePictureUrl = profilePicture.location || `/upload/${profilePicture.filename}`;
 
-    // Update user (assuming you have an avatar field - if not, add it to migration)
-    // For now, we'll store it in socialLinks as a workaround
-    const socialLinks = user.socialLinks || {};
-    socialLinks.profilePicture = profilePictureUrl;
-    
+    // Stored in socialLinks.profilePicture (see utils/userAvatar.js). A new
+    // object, so Sequelize sees the JSONB change; replaces a Google photo too.
+    const socialLinks = { ...(user.socialLinks || {}), profilePicture: profilePictureUrl, profilePictureSource: 'upload' };
     await user.update({ socialLinks });
 
     return res.json({
       success: true,
       message: 'Profile picture updated successfully',
-      profilePictureUrl
+      profilePictureUrl,
+      avatarUrl: profilePictureUrl
     });
   } catch (error) {
     console.error('[Profile Controller] Update profile picture error:', error);

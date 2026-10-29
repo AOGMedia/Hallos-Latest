@@ -1,10 +1,12 @@
 const sequelize = require('../config/db');
 
 /**
- * Prepares live_classes for GetStream on boot, before the server takes
+ * Prepares the live tables for GetStream on boot, before the server takes
  * requests:
- *   - adds 'getstream' to the streaming_provider enum, and
- *   - adds the getstream_call_id column (the class's current GetStream call).
+ *   - adds 'getstream' to live_classes.streaming_provider (an enum),
+ *   - adds live_classes.getstream_call_id (the class's current GetStream call),
+ *   - adds live_series.streaming_provider (VARCHAR, default 'zegocloud', so
+ *     every existing series keeps using ZegoCloud).
  *
  * Why at boot and not only in a migration: Render runs `node server.js`
  * without running migrations (see ensureLiveIdempotency.js). Every statement
@@ -18,6 +20,7 @@ const sequelize = require('../config/db');
  */
 
 let ready = false;
+let seriesReady = false;
 
 /** The Postgres type behind live_classes.streaming_provider, if it's an enum. */
 const providerEnumType = async () => {
@@ -45,14 +48,38 @@ const providerAcceptsGetStream = async () => {
   return rows.length > 0;
 };
 
-const callIdColumnExists = async () => {
+const columnExists = async (table, column) => {
   const [rows] = await sequelize.query(
     `SELECT 1 FROM information_schema.columns
       WHERE table_schema = current_schema()
-        AND table_name = 'live_classes'
-        AND column_name = 'getstream_call_id'`
+        AND table_name = :table
+        AND column_name = :column`,
+    { replacements: { table, column } }
   );
   return rows.length > 0;
+};
+
+/** live_series.streaming_provider — independent of the live_classes changes. */
+const ensureSeriesProvider = async () => {
+  try {
+    await sequelize.query(
+      "ALTER TABLE live_series ADD COLUMN IF NOT EXISTS streaming_provider VARCHAR(20) NOT NULL DEFAULT 'zegocloud'"
+    );
+  } catch (error) {
+    console.error('❌ Could not add streaming_provider to live_series:', error.message);
+  }
+
+  let present = false;
+  try {
+    present = await columnExists('live_series', 'streaming_provider');
+  } catch (error) {
+    console.error('❌ Could not verify live_series.streaming_provider:', error.message);
+  }
+  if (!present) {
+    // Series then read as ZegoCloud, exactly as before.
+    require('../models/LiveSeries').removeAttribute('streamingProvider');
+  }
+  return present;
 };
 
 const ensureGetStreamSupport = async () => {
@@ -77,7 +104,7 @@ const ensureGetStreamSupport = async () => {
   let columnReady = false;
   try {
     enumReady = await providerAcceptsGetStream();
-    columnReady = await callIdColumnExists();
+    columnReady = await columnExists('live_classes', 'getstream_call_id');
   } catch (error) {
     console.error('❌ Could not verify GetStream schema:', error.message);
   }
@@ -93,9 +120,19 @@ const ensureGetStreamSupport = async () => {
   } else {
     console.warn('⚠️ GetStream schema unavailable — GetStream live classes are disabled; ZegoCloud is unaffected');
   }
+
+  seriesReady = await ensureSeriesProvider();
+  if (seriesReady) {
+    console.log('✅ GetStream series schema verified');
+  } else {
+    console.warn('⚠️ GetStream series schema unavailable — GetStream live series are disabled; ZegoCloud is unaffected');
+  }
 };
 
 /** Whether live_classes can store GetStream classes. */
 const isGetStreamSchemaReady = () => ready;
 
-module.exports = { ensureGetStreamSupport, isGetStreamSchemaReady };
+/** Whether live_series can store a provider choice. */
+const isGetStreamSeriesSchemaReady = () => seriesReady;
+
+module.exports = { ensureGetStreamSupport, isGetStreamSchemaReady, isGetStreamSeriesSchemaReady };

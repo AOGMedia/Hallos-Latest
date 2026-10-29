@@ -89,6 +89,31 @@ exports.uploadVideo = async (req, res) => {
   }
 };
 
+/**
+ * Adds the creator's name and profile picture to videos (`author`,
+ * `authorAvatar` — the fields the frontend already reads). One query for the
+ * whole list. Best-effort: on any failure the videos are returned unchanged.
+ */
+const attachAuthors = async (videos) => {
+  try {
+    const ids = [...new Set(videos.map((v) => v.userId).filter(Boolean))];
+    if (!ids.length) return videos;
+    const User = require('../models/User');
+    const { avatarUrlOf } = require('../utils/userAvatar');
+    const users = await User.findAll({ where: { id: ids }, attributes: ['id', 'firstname', 'lastname', 'socialLinks'] });
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return videos.map((v) => {
+      const u = byId.get(v.userId);
+      if (!u) return v;
+      const author = `${u.firstname || ''} ${u.lastname || ''}`.trim();
+      return { ...v, ...(author ? { author } : {}), authorAvatar: avatarUrlOf(u) };
+    });
+  } catch (error) {
+    console.warn('[Video Controller] Could not attach authors:', error.message);
+    return videos;
+  }
+};
+
 exports.getAllVideos = async (req, res) => {
   try {
     const { type, category, search } = req.query;
@@ -109,11 +134,11 @@ exports.getAllVideos = async (req, res) => {
     });
 
     // Add dual pricing to each video
-    const videosWithPricing = videos.map(video => {
+    const videosWithPricing = await attachAuthors(videos.map(video => {
       const videoData = video.toJSON();
       videoData.pricing = video.getDualPricing();
       return videoData;
-    });
+    }));
 
     return res.status(200).json({
       count: videosWithPricing.length,
@@ -169,8 +194,10 @@ exports.getVideoById = async (req, res) => {
     const ipAddress = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     recordView({ videoId: id, userId, ipAddress });
 
+    const [withAuthor] = await attachAuthors([{ ...video.dataValues }]);
+
     return res.status(200).json({
-      ...video.dataValues,
+      ...withAuthor,
       playbackUrl,
       accessGranted: true,
       accessReason: req.accessReason,

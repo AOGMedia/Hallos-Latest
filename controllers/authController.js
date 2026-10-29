@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const User = require('../models/User');
+const { avatarUrlOf } = require('../utils/userAvatar');
 const SECRET_KEY = process.env.JWT_SECRET_KEY;
 
 exports.signup = async (req, res) => {
@@ -97,7 +98,8 @@ exports.login = async (req, res) => {
         email: user.email,
         firstname: user.firstname,
         lastname: user.lastname,
-        role: user.role
+        role: user.role,
+        avatarUrl: avatarUrlOf(user)
       }
     });
   } catch (error) {
@@ -113,7 +115,7 @@ exports.getMe = async (req, res) => {
 
     // Fetch user details from database
     const user = await User.findByPk(userId, {
-      attributes: ['id', 'firstname', 'lastname', 'email', 'role', 'createdAt', 'updatedAt']
+      attributes: ['id', 'firstname', 'lastname', 'email', 'role', 'socialLinks', 'createdAt', 'updatedAt']
     });
 
     if (!user) {
@@ -133,6 +135,7 @@ exports.getMe = async (req, res) => {
         role: user.role,
         // provider: user.provider || 'local',
         fullName: `${user.firstname} ${user.lastname}`.trim(),
+        avatarUrl: avatarUrlOf(user),
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
       }

@@ -2,6 +2,16 @@ const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const liveSeriesService = require('../services/liveSeriesService');
 const { zegoCloudService } = require('../services/zegoCloudService');
 const User = require('../models/User');
+const { seriesProviderOf } = require('../utils/liveProviders');
+const { withAvatar } = require('../utils/userAvatar');
+
+/** These are the ZegoCloud session endpoints; GetStream series use the *-getstream ones. */
+const usesGetStream = (res) =>
+  res.status(400).json({
+    success: false,
+    code: 'PROVIDER_GETSTREAM',
+    message: 'This series uses GetStream. Use the GetStream session endpoints instead.'
+  });
 
 /**
  * Start a session (creator only)
@@ -34,6 +44,8 @@ exports.startSession = async (req, res) => {
         message: 'Only the creator can start this session'
       });
     }
+
+    if (seriesProviderOf(session.series) !== 'zegocloud') return usesGetStream(res);
     
     // Check if session can be started
     if (!session.canStart()) {
@@ -194,6 +206,8 @@ exports.joinSession = async (req, res) => {
       });
     }
     
+    if (seriesProviderOf(session.series) !== 'zegocloud') return usesGetStream(res);
+
     // Check if session is live
     if (!session.canJoin()) {
       return res.status(400).json({
@@ -283,11 +297,12 @@ exports.getSessionById = async (req, res) => {
         include: [{
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (not returned).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }]
       }]
     });
-    
+
     if (!session) {
       return res.status(404).json({
         success: false,
@@ -319,10 +334,15 @@ exports.getSessionById = async (req, res) => {
       }
     }
     
+    // Series with the creator's profile picture (avatarUrl).
+    const seriesJson = session.series ? session.series.toJSON() : null;
+    if (seriesJson && seriesJson.creator) seriesJson.creator = withAvatar(seriesJson.creator);
+
     return res.json({
       success: true,
       session: {
         ...session.dataValues,
+        series: seriesJson,
         hasAccess,
         accessReason,
         requiresPayment: !hasAccess && price > 0
