@@ -19,6 +19,8 @@ const registrationRoutes = require('./routes/registrationRoutes');
 const videoRoutes = require('./routes/videoRoutes');
 const liveRoutes = require('./routes/liveRoutes');
 const zegoCloudRoutes = require('./routes/zegoCloudRoutes');
+const getStreamRoutes = require('./routes/getStreamRoutes');
+const getStreamSeriesRoutes = require('./routes/getStreamSeriesRoutes');
 const liveSeriesRoutes = require('./routes/liveSeries');
 const userRoutes = require('./routes/userRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
@@ -41,6 +43,8 @@ const blogRoutes = require('./routes/blogRoutes');
 const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
 const { ensureSupportTables } = require('./utils/ensureSupportTables');
+const { ensureLiveIdempotency } = require('./utils/ensureLiveIdempotency');
+const { ensureGetStreamSupport } = require('./utils/ensureGetStreamSupport');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -162,8 +166,10 @@ app.use('/auth', authRateLimiter, passwordResetRoutes); //  Password reset route
 app.use('/register', rateLimiter);
 app.use('/event', registrationRoutes);
 app.use('/live', liveRoutes);
+app.use('/live', getStreamRoutes);
 app.use('/api/live/zegocloud', zegoCloudRoutes);
 app.use('/api/live/series', liveSeriesRoutes);
+app.use('/api/live/series', getStreamSeriesRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payments', financialRateLimiter, paymentRoutes);
 app.use('/api/wallet', financialRateLimiter, walletRoutes);
@@ -206,6 +212,12 @@ const PORT = process.env.PORT || 8080;
     
 sequelize.sync({ force: false })
   .then(() => ensureSupportTables())
+  // Must run before app.listen — the live models declare idempotencyKey,
+  // so the column has to exist before the first request touches them.
+  .then(() => ensureLiveIdempotency())
+  // Same reason: LiveClass declares getstream_call_id. Never throws — on
+  // failure it disables GetStream and leaves ZegoCloud untouched.
+  .then(() => ensureGetStreamSupport())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
@@ -236,6 +248,13 @@ sequelize.sync({ force: false })
       setupLiveClassCleanup();
       setupEmailScheduler();
       setupQuizScheduledTasks();
+
+      // Removes chat photos of GetStream classes/sessions that have ended.
+      try {
+        require('./services/liveChatMediaService').startChatMediaSweeper();
+      } catch (err) {
+        console.error('❌ Failed to start live chat media sweeper:', err.message);
+      }
     });
   })
   .catch(err => console.error('DB Connection Failed:', err));

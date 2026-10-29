@@ -1,6 +1,22 @@
 const { LiveClass, LiveHost, LiveAttendee } = require('../models/liveIndex');
 const muxLiveService = require('../services/muxLiveService');
+const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempotencyKey');
+const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
 const User = require('../models/User');
+const { isGetStreamAvailable } = require('../utils/liveProviders');
+const { avatarUrlOf, withAvatar } = require('../utils/userAvatar');
+
+/**
+ * A listed class with each host's profile picture (hosts[].User.avatarUrl)
+ * and the creator's as creatorAvatarUrl. The socialLinks loaded to read the
+ * picture are not returned.
+ */
+const withHostAvatars = (classData) => {
+  if (!Array.isArray(classData.hosts)) return classData;
+  const hosts = classData.hosts.map((h) => (h && h.User ? { ...h, User: withAvatar(h.User) } : h));
+  const creatorHost = hosts.find((h) => h && h.role === 'creator') || hosts[0];
+  return { ...classData, hosts, creatorAvatarUrl: (creatorHost && creatorHost.User && creatorHost.User.avatarUrl) || null };
+};
 
 // --- HELPER: Centralized Error Handler ---
 // This translates database/code errors into Frontend-friendly messages
@@ -44,10 +60,56 @@ const handleError = (res, error) => {
 };
 
 
+/**
+ * Response body for a created live class. Shared by a fresh create and an
+ * idempotent replay so the two can never drift — the frontend's community
+ * link, ZegoCloud start and redirect all key off this shape.
+ */
+const createdLiveClassResponse = (liveClass, extra = {}) => ({
+  success: true,
+  ...extra,
+  liveClass: {
+    ...liveClass.dataValues,
+    // Include helpful info for frontend
+    streamingProvider: liveClass.streaming_provider,
+    isZegoCloud: liveClass.streaming_provider === 'zegocloud',
+    isGetStream: liveClass.streaming_provider === 'getstream',
+    isMux: liveClass.streaming_provider === 'mux',
+    pricing: liveClass.getDualPricing()
+  }
+});
+
+/**
+ * A create that repeats an idempotency key returns the live class the first
+ * attempt already made. The first attempt may have died between inserting
+ * the class and adding the creator as host, so that row is restored here.
+ */
+const replayLiveClass = async (liveClass, userId) => {
+  await LiveHost.findOrCreate({
+    where: { liveClassId: liveClass.id, userId },
+    defaults: { liveClassId: liveClass.id, userId, role: 'creator' }
+  });
+  return createdLiveClassResponse(liveClass, { idempotentReplay: true });
+};
+
 exports.createLiveClass = async (req, res) => {
   try {
-    const { title, description, price, currency, category, thumbnailUrl, startTime, endTime, privacy, streamingProvider = 'mux' } = req.body;
+    // Default to ZegoCloud (in-app streaming). Mux is still accepted when a
+    // client asks for it explicitly, but no client should rely on the default.
+    const { title, description, price, currency, category, thumbnailUrl, startTime, endTime, privacy, streamingProvider = 'zegocloud' } = req.body;
     const userId = req.user.id;
+
+    // Survive bad networks: the client sends the same key on every attempt
+    // for one form submission. If an earlier attempt already created the
+    // class (its response was lost to a timeout), return that instead of a
+    // duplicate. Checked before any side effects, e.g. creating a Mux stream.
+    const idempotencyKey = isLiveIdempotencyEnabled('live_classes') ? readIdempotencyKey(req) : null;
+    if (idempotencyKey) {
+      const existing = await LiveClass.findOne({ where: { idempotencyKey, userId } });
+      if (existing) {
+        return res.json(await replayLiveClass(existing, userId));
+      }
+    }
     
     // Handle thumbnail - either from file upload or URL string
     // Check multiple possible field names (thumbnail, thumbnailUrl, image, file)
@@ -67,11 +129,22 @@ exports.createLiveClass = async (req, res) => {
       : 'NGN';
 
     // Validate streaming provider
-    if (!['mux', 'zegocloud'].includes(streamingProvider)) {
-      return res.status(400).json({ success: false, message: "Invalid streaming provider. Must be 'mux' or 'zegocloud'" });
+    if (!['mux', 'zegocloud', 'getstream'].includes(streamingProvider)) {
+      return res.status(400).json({ success: false, message: "Invalid streaming provider. Must be 'mux', 'zegocloud' or 'getstream'" });
+    }
+    if (streamingProvider === 'getstream' && !isGetStreamAvailable()) {
+      return res.status(400).json({ success: false, message: 'GetStream live classes are not available yet. Please choose Stream In-App.' });
     }
 
     let streamingDetails = {};
+
+    if (streamingProvider === 'getstream') {
+      // The call is created when the creator goes live (getStreamService).
+      streamingDetails = {
+        streaming_provider: 'getstream',
+        max_participants: req.body.maxParticipants || 200
+      };
+    }
 
     if (streamingProvider === 'zegocloud') {
       // Step 1b: Prepare for ZegoCloud (room will be created when going live)
@@ -98,20 +171,35 @@ exports.createLiveClass = async (req, res) => {
     } 
 
     // Step 2: Create LiveClass row
-    const liveClass = await LiveClass.create({
-      userId,
-      title,
-      description,
-      price,
-      currency: finalCurrency,
-      category,
-      thumbnailUrl: finalThumbnailUrl,
-      startTime,
-      endTime,
-      privacy,
-      status: 'scheduled', // Ensure this matches your Enum definition exactly
-      ...streamingDetails
-    });
+    let liveClass;
+    try {
+      liveClass = await LiveClass.create({
+        userId,
+        title,
+        description,
+        price,
+        currency: finalCurrency,
+        category,
+        thumbnailUrl: finalThumbnailUrl,
+        startTime,
+        endTime,
+        privacy,
+        status: 'scheduled', // Ensure this matches your Enum definition exactly
+        ...streamingDetails,
+        ...(idempotencyKey ? { idempotencyKey } : {})
+      });
+    } catch (createError) {
+      // Two attempts with the same key raced (the user retried while the
+      // first was still in flight): the unique index let only one insert
+      // through. Return that one.
+      if (idempotencyKey && isIdempotencyConflict(createError, 'idx_live_classes_idempotency_key_unique')) {
+        const existing = await LiveClass.findOne({ where: { idempotencyKey, userId } });
+        if (existing) {
+          return res.json(await replayLiveClass(existing, userId));
+        }
+      }
+      throw createError;
+    }
 
     // Step 3: Add creator as primary host
     await LiveHost.create({
@@ -120,17 +208,7 @@ exports.createLiveClass = async (req, res) => {
       role: 'creator'
     });
 
-    return res.json({ 
-      success: true, 
-      liveClass: {
-        ...liveClass.dataValues,
-        // Include helpful info for frontend
-        streamingProvider: liveClass.streaming_provider,
-        isZegoCloud: liveClass.streaming_provider === 'zegocloud',
-        isMux: liveClass.streaming_provider === 'mux',
-        pricing: liveClass.getDualPricing()
-      }
-    });
+    return res.json(createdLiveClassResponse(liveClass));
 
     // Queue digest notifications in background (fire-and-forget)
     setImmediate(async () => {
@@ -193,7 +271,8 @@ exports.getLiveClassById = async (req, res) => {
       include: [{
         model: User,
         as: 'creator',
-        attributes: ['id', 'firstname', 'lastname', 'email']
+        // socialLinks only to read the profile picture (not returned).
+        attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
       }]
     });
     
@@ -312,7 +391,8 @@ exports.getLiveClassById = async (req, res) => {
         id: live.creator.id,
         name: `${live.creator.firstname} ${live.creator.lastname}`.trim(),
         firstname: live.creator.firstname,
-        lastname: live.creator.lastname
+        lastname: live.creator.lastname,
+        avatarUrl: avatarUrlOf(live.creator)
       } : null,
       // Access flags
       hasAccess,
@@ -332,6 +412,11 @@ exports.getLiveClassById = async (req, res) => {
         publicInfo.zego_room_id = live.zego_room_id;
         publicInfo.zego_app_id = live.zego_app_id;
         publicInfo.isZegoCloud = true;
+        publicInfo.isMux = false;
+      } else if (live.streaming_provider === 'getstream') {
+        // Join credentials come from POST /live/:id/join-getstream.
+        publicInfo.isGetStream = true;
+        publicInfo.isZegoCloud = false;
         publicInfo.isMux = false;
       } else if (live.streaming_provider === 'mux') {
         publicInfo.mux_stream_id = live.mux_stream_id;
@@ -393,6 +478,14 @@ exports.getPlayback = async (req, res) => {
         success: false,
         message: 'ZegoCloud streams use real-time joining. Use /api/live/zegocloud/join-room instead.',
         redirectTo: `/api/live/zegocloud/join-room`,
+        liveClassId: live.id
+      });
+    }
+
+    if (live.streaming_provider === 'getstream') {
+      return res.status(400).json({
+        success: false,
+        message: 'GetStream classes use real-time joining. Use /live/:id/join-getstream instead.',
         liveClassId: live.id
       });
     }
@@ -562,6 +655,39 @@ exports.endZegoCloudSession = async (req, res) => {
   }
 };
 
+/**
+ * Host heartbeat for a ZegoCloud live class.
+ * POST /live/:id/heartbeat-zegocloud  { roomId }
+ *
+ * Sent by the host's browser while they are in the room. Keeps the class
+ * fresh, and reopens it if it was wrongly marked ended while the host is still
+ * in the same room (see services/liveRecoveryService.js).
+ */
+exports.zegoCloudHeartbeat = async (req, res) => {
+  try {
+    const { id: liveClassId } = req.params;
+    const { roomId } = req.body || {};
+
+    const liveClass = await LiveClass.findByPk(liveClassId);
+    if (!liveClass) {
+      return res.status(404).json({ success: false, message: 'Live class not found' });
+    }
+    if (liveClass.userId !== req.user.id) {
+      return res.status(403).json({ success: false, message: 'Only the creator can send a host heartbeat' });
+    }
+    if (liveClass.streaming_provider !== 'zegocloud') {
+      return res.status(400).json({ success: false, message: 'This live class is not configured for ZegoCloud streaming' });
+    }
+
+    const { applyHostHeartbeat } = require('../services/liveRecoveryService');
+    const result = await applyHostHeartbeat(liveClass, roomId);
+
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
 exports.getAllLiveClasses = async (req, res) => {
   try {
     const { status, privacy, category, showAll, limit = 20, offset = 0 } = req.query;
@@ -599,16 +725,16 @@ exports.getAllLiveClasses = async (req, res) => {
         {
           model: LiveHost,
           as: 'hosts',
-          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email'] }]
+          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks'] }]
         }
       ]
     });
 
-    // Add dual pricing to each live class
+    // Add dual pricing (and host pictures) to each live class
     const liveClassesWithPricing = liveClasses.map(liveClass => {
       const classData = liveClass.toJSON();
       classData.pricing = liveClass.getDualPricing();
-      return classData;
+      return withHostAvatars(classData);
     });
 
     return res.json({
@@ -657,16 +783,16 @@ exports.getMyLiveClasses = async (req, res) => {
         {
           model: LiveHost,
           as: 'hosts',
-          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email'] }]
+          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks'] }]
         }
       ]
     });
 
-    // Add dual pricing to each live class
+    // Add dual pricing (and host pictures) to each live class
     const liveClassesWithPricing = liveClasses.map(liveClass => {
       const classData = liveClass.toJSON();
       classData.pricing = liveClass.getDualPricing();
-      return classData;
+      return withHostAvatars(classData);
     });
 
     return res.json({ 
@@ -835,7 +961,22 @@ exports.linkLiveClassToCommunity = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You must be an active member of this community.' });
     }
 
-    const submission = await CommunityContentSubmission.create({
+    // A retried create (bad network) replays the same live class and the
+    // client links it again — reuse the pending submission rather than
+    // queueing a duplicate for the moderators. Only pending ones: after a
+    // rejection, resubmitting is legitimate.
+    const { Op } = require('sequelize');
+    const existingSubmission = await CommunityContentSubmission.findOne({
+      where: {
+        communityId,
+        submittedBy: userId,
+        contentType: 'live_class',
+        status: 'pending',
+        contentData: { [Op.contains]: { id: liveClass.id } }
+      }
+    });
+
+    const submission = existingSubmission || await CommunityContentSubmission.create({
       communityId,
       submittedBy: userId,
       contentType: 'live_class',

@@ -2,6 +2,68 @@ const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const liveSeriesService = require('../services/liveSeriesService');
 const User = require('../models/User');
 const { Op } = require('sequelize');
+const sequelize = require('../config/db');
+const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempotencyKey');
+const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
+const { resolveSeriesProvider, seriesProviderOf } = require('../utils/liveProviders');
+const { withAvatar } = require('../utils/userAvatar');
+
+/** The series creator with avatarUrl (and without the socialLinks loaded to read it). */
+const creatorWithAvatar = (series) => {
+  const creator = series.creator || (series.dataValues && series.dataValues.creator);
+  if (!creator) return creator;
+  return withAvatar(typeof creator.toJSON === 'function' ? creator.toJSON() : creator);
+};
+
+/**
+ * Response body for a created series. Shared by a fresh create and an
+ * idempotent replay so the frontend sees the same shape either way.
+ */
+const createdSeriesResponse = (series, totalSessions, extra = {}) => ({
+  success: true,
+  message: 'Live series created successfully',
+  ...extra,
+  series: {
+    ...series.dataValues,
+    totalSessions,
+    pricing: series.getDualPricing()
+  }
+});
+
+/**
+ * Generate a series' sessions exactly once, returning how many it has.
+ *
+ * On a bad connection a retry can arrive while the first request is still
+ * generating sessions: both see the series, both count zero, both generate —
+ * duplicate sessions. A transaction-scoped advisory lock on the series id
+ * serializes them, and the count is taken inside the lock, so whichever runs
+ * second sees the first one's sessions. The lock is held until the callback
+ * returns, i.e. until the session bulkCreate has finished and committed.
+ *
+ * Zero sessions reliably means "never generated": createSessionsForSeries
+ * writes them in one bulkCreate (a single INSERT — all or none).
+ */
+const ensureSessions = async (series) =>
+  sequelize.transaction(async (t) => {
+    await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:seriesId))', {
+      replacements: { seriesId: String(series.id) },
+      transaction: t
+    });
+    const existingCount = await LiveSession.count({ where: { seriesId: series.id }, transaction: t });
+    if (existingCount > 0) return existingCount;
+    const sessions = await liveSeriesService.createSessionsForSeries(series);
+    return sessions.length;
+  });
+
+/**
+ * A create that repeats an idempotency key returns the series the first
+ * attempt already made — generating its sessions if that attempt died
+ * after inserting the series but before writing them.
+ */
+const replaySeries = async (series) => {
+  const totalSessions = await ensureSessions(series);
+  return createdSeriesResponse(series, totalSessions, { idempotentReplay: true });
+};
 
 /**
  * Create a new live series
@@ -20,11 +82,25 @@ exports.createSeries = async (req, res) => {
       endDate,
       recurrencePattern,
       privacy,
-      maxParticipants
+      maxParticipants,
+      streamingProvider
     } = req.body;
-    
+
     const userId = req.user.id;
-    
+
+    // Survive bad networks: same key on every attempt for one submission. If
+    // an earlier attempt already created the series (its response was lost),
+    // return it rather than creating a duplicate series and session set.
+    // Checked before validation so a late retry can't be rejected by the
+    // start-date window after the first attempt already succeeded.
+    const idempotencyKey = isLiveIdempotencyEnabled('live_series') ? readIdempotencyKey(req) : null;
+    if (idempotencyKey) {
+      const existing = await LiveSeries.findOne({ where: { idempotencyKey, userId } });
+      if (existing) {
+        return res.status(201).json(await replaySeries(existing));
+      }
+    }
+
     // Parse recurrencePattern if it's a string (from FormData)
     if (typeof recurrencePattern === 'string') {
       try {
@@ -43,6 +119,12 @@ exports.createSeries = async (req, res) => {
         success: false,
         message: 'Title, start date, end date, and recurrence pattern are required'
       });
+    }
+
+    // Provider for every session of the series (defaults to ZegoCloud).
+    const providerChoice = resolveSeriesProvider(streamingProvider);
+    if (providerChoice.error) {
+      return res.status(400).json({ success: false, message: providerChoice.error });
     }
     
     // Validate recurrence pattern
@@ -89,36 +171,45 @@ exports.createSeries = async (req, res) => {
       : 'NGN';
     
     // Create series
-    const series = await LiveSeries.create({
-      userId,
-      title,
-      description,
-      price: price || 0,
-      currency: finalCurrency,
-      category,
-      thumbnailUrl: finalThumbnailUrl,
-      startDate: start,
-      endDate: end,
-      recurrencePattern,
-      privacy: privacy || 'public',
-      maxParticipants: maxParticipants || 200,
-      status: 'active'
-    });
-    
-    // Generate and create sessions
-    const sessions = await liveSeriesService.createSessionsForSeries(series);
-    
-    console.log(`[Live Series Controller] Created series ${series.id} with ${sessions.length} sessions`);
-    
-    return res.status(201).json({
-      success: true,
-      message: 'Live series created successfully',
-      series: {
-        ...series.dataValues,
-        totalSessions: sessions.length,
-        pricing: series.getDualPricing()
+    let series;
+    try {
+      series = await LiveSeries.create({
+        userId,
+        title,
+        description,
+        price: price || 0,
+        currency: finalCurrency,
+        category,
+        thumbnailUrl: finalThumbnailUrl,
+        startDate: start,
+        endDate: end,
+        recurrencePattern,
+        privacy: privacy || 'public',
+        maxParticipants: maxParticipants || 200,
+        status: 'active',
+        // Only set when GetStream is picked, so a series is created exactly
+        // as before when the column isn't available (see ensureGetStreamSupport).
+        ...(providerChoice.provider !== 'zegocloud' ? { streamingProvider: providerChoice.provider } : {}),
+        ...(idempotencyKey ? { idempotencyKey } : {})
+      });
+    } catch (createError) {
+      // Concurrent attempts with the same key: only one insert got through.
+      if (idempotencyKey && isIdempotencyConflict(createError, 'idx_live_series_idempotency_key_unique')) {
+        const existing = await LiveSeries.findOne({ where: { idempotencyKey, userId } });
+        if (existing) {
+          return res.status(201).json(await replaySeries(existing));
+        }
       }
-    });
+      throw createError;
+    }
+
+    // Generate and create sessions (serialized against a concurrent retry —
+    // see ensureSessions)
+    const totalSessions = await ensureSessions(series);
+
+    console.log(`[Live Series Controller] Created series ${series.id} with ${totalSessions} sessions`);
+
+    return res.status(201).json(createdSeriesResponse(series, totalSessions));
 
     // Queue digest notifications in background (fire-and-forget)
     setImmediate(async () => {
@@ -176,7 +267,8 @@ exports.getAllSeries = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -187,18 +279,19 @@ exports.getAllSeries = async (req, res) => {
         const stats = await liveSeriesService.calculateSeriesStats(s.id);
         return {
           ...s.dataValues,
+          creator: creatorWithAvatar(s),
           stats,
           pricing: s.getDualPricing()
         };
       })
     );
-    
+
     return res.json({
       success: true,
       count: seriesWithStats.length,
       series: seriesWithStats
     });
-    
+
   } catch (error) {
     console.error('[Live Series Controller] Get all series error:', error);
     return res.status(500).json({
@@ -230,7 +323,8 @@ exports.getMySeries = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -241,18 +335,19 @@ exports.getMySeries = async (req, res) => {
         const stats = await liveSeriesService.calculateSeriesStats(s.id);
         return {
           ...s.dataValues,
+          creator: creatorWithAvatar(s),
           stats,
           pricing: s.getDualPricing()
         };
       })
     );
-    
+
     return res.json({
       success: true,
       count: seriesWithStats.length,
       series: seriesWithStats
     });
-    
+
   } catch (error) {
     console.error('[Live Series Controller] Get my series error:', error);
     return res.status(500).json({
@@ -275,7 +370,8 @@ exports.getSeriesById = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          attributes: ['id', 'firstname', 'lastname', 'email']
+          // socialLinks only to read the profile picture (see creatorWithAvatar).
+          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
         }
       ]
     });
@@ -330,6 +426,7 @@ exports.getSeriesById = async (req, res) => {
       success: true,
       series: {
         ...series.dataValues,
+        creator: creatorWithAvatar(series),
         stats,
         hasAccess,
         accessReason,
@@ -406,9 +503,10 @@ exports.updateSeries = async (req, res) => {
       thumbnailUrl,
       privacy,
       maxParticipants,
-      endDate
+      endDate,
+      streamingProvider
     } = req.body;
-    
+
     // Get series
     const series = await LiveSeries.findByPk(id);
     if (!series) {
@@ -441,7 +539,24 @@ exports.updateSeries = async (req, res) => {
     if (finalThumbnailUrl) updates.thumbnailUrl = finalThumbnailUrl;
     if (privacy) updates.privacy = privacy;
     if (maxParticipants) updates.maxParticipants = maxParticipants;
-    
+
+    // Switching provider applies to sessions that haven't started yet. Not
+    // while a session is live: its attendees are on the current provider.
+    if (streamingProvider && streamingProvider !== seriesProviderOf(series)) {
+      const providerChoice = resolveSeriesProvider(streamingProvider);
+      if (providerChoice.error) {
+        return res.status(400).json({ success: false, message: providerChoice.error });
+      }
+      const liveCount = await LiveSession.count({ where: { seriesId: series.id, status: 'live' } });
+      if (liveCount > 0) {
+        return res.status(409).json({
+          success: false,
+          message: 'End the live session before changing the streaming method'
+        });
+      }
+      updates.streamingProvider = providerChoice.provider;
+    }
+
     // Handle end date extension
     let newSessionsGenerated = 0;
     if (endDate) {
@@ -618,7 +733,21 @@ exports.linkLiveSeriesToCommunity = async (req, res) => {
       return res.status(403).json({ success: false, message: 'You must be an active member of this community.' });
     }
 
-    const submission = await CommunityContentSubmission.create({
+    // A retried create (bad network) replays the same series and the client
+    // links it again — reuse the pending submission rather than queueing a
+    // duplicate for the moderators. Only pending ones: after a rejection,
+    // resubmitting is legitimate.
+    const existingSubmission = await CommunityContentSubmission.findOne({
+      where: {
+        communityId,
+        submittedBy: userId,
+        contentType: 'live_series',
+        status: 'pending',
+        contentData: { [Op.contains]: { id: series.id } }
+      }
+    });
+
+    const submission = existingSubmission || await CommunityContentSubmission.create({
       communityId,
       submittedBy: userId,
       contentType: 'live_series',

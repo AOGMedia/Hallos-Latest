@@ -280,8 +280,17 @@ class ZegoCloudService {
       if (existingClass.status === 'live') {
         throw new Error('Live class is already active');
       }
-      
-      const roomResult = await this.createRoom(liveClassId, creatorId, options);
+
+      // Restarting a class reuses its existing room. Generating a new room ID
+      // here would put the host in a fresh, empty room while attendees still
+      // in the original room (rooms are never force-closed) are left behind.
+      const roomResult = existingClass.zego_room_id
+        ? {
+            roomId: existingClass.zego_room_id,
+            appId: ZEGO_APP_ID,
+            creatorToken: this.generateToken(existingClass.zego_room_id, creatorId, 'host'),
+          }
+        : await this.createRoom(liveClassId, creatorId, options);
       
       await existingClass.update({
         zego_room_id: roomResult.roomId,

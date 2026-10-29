@@ -83,6 +83,22 @@ const LiveSeries = sequelize.define('LiveSeries', {
     type: DataTypes.STRING(20),
     allowNull: true,
     field: 'community_visibility'
+  },
+  // Live provider for every session of the series: 'zegocloud' or 'getstream'.
+  // Added on boot by ensureGetStreamSupport (existing series stay zegocloud).
+  streamingProvider: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'zegocloud',
+    field: 'streaming_provider'
+  },
+  // Same purpose as LiveClass.idempotencyKey — lets a retried create after a
+  // network failure return the series that already exists instead of
+  // creating a duplicate (with its own duplicate generated sessions).
+  idempotencyKey: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    field: 'idempotency_key'
   }
 }, {
   tableName: 'live_series',
