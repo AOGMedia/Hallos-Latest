@@ -22,6 +22,8 @@ const zegoCloudRoutes = require('./routes/zegoCloudRoutes');
 const getStreamRoutes = require('./routes/getStreamRoutes');
 const getStreamSeriesRoutes = require('./routes/getStreamSeriesRoutes');
 const liveSeriesRoutes = require('./routes/liveSeries');
+const emailCampaignRoutes = require('./routes/emailCampaignRoutes');
+const emailCampaignWorker = require('./services/emailCampaignWorker');
 const userRoutes = require('./routes/userRoutes');
 const paymentRoutes = require('./routes/paymentRoutes');
 const walletRoutes = require('./routes/walletRoutes');
@@ -56,6 +58,8 @@ const suspiciousActivityService = require('./services/suspiciousActivityService'
 require('./models/walletIndex');
 require('./models/courseIndex');
 require('./models/liveSeriesIndex');
+require('./models/EmailCampaignRecipient');
+require('./models/EmailSuppression');
 require('./models/feedbackIndex');
 require('./models/ugcIndex');
 require('./models/referralIndex');
@@ -170,6 +174,7 @@ app.use('/live', getStreamRoutes);
 app.use('/api/live/zegocloud', zegoCloudRoutes);
 app.use('/api/live/series', liveSeriesRoutes);
 app.use('/api/live/series', getStreamSeriesRoutes);
+app.use('/api/email-portal', emailCampaignRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/payments', financialRateLimiter, paymentRoutes);
 app.use('/api/wallet', financialRateLimiter, walletRoutes);
@@ -246,6 +251,8 @@ sequelize.sync({ force: false })
       });
       
       setupLiveClassCleanup();
+
+      emailCampaignWorker.start();
       setupEmailScheduler();
       setupQuizScheduledTasks();
 
