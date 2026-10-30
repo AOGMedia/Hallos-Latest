@@ -21,6 +21,8 @@ const settings = () => {
   };
 };
 
+const CONNECTION_CODES = ['ETIMEDOUT', 'ECONNECTION', 'ESOCKET', 'ECONNREFUSED', 'EDNS'];
+
 let transporter = null;
 
 const getTransporter = () => {
@@ -34,6 +36,9 @@ const getTransporter = () => {
     pool: true,
     maxConnections: 2,
     maxMessages: 100,
+    connectionTimeout: 20 * 1000,
+    greetingTimeout: 20 * 1000,
+    socketTimeout: 60 * 1000,
     tls: { rejectUnauthorized: false }
   });
   return transporter;
@@ -48,16 +53,23 @@ const sendCampaignMail = async ({ to, subject, html, text, unsubscribeUrl, recip
   }
   if (recipientId) headers['X-Entity-Ref-ID'] = recipientId;
 
-  const info = await getTransporter().sendMail({
-    from: `"${s.fromName}" <${s.fromAddress}>`,
-    replyTo: s.replyTo,
-    to,
-    subject,
-    html,
-    text,
-    headers
-  });
-  return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };
+  try {
+    const info = await getTransporter().sendMail({
+      from: `"${s.fromName}" <${s.fromAddress}>`,
+      replyTo: s.replyTo,
+      to,
+      subject,
+      html,
+      text,
+      headers
+    });
+    return { messageId: info.messageId, accepted: info.accepted, rejected: info.rejected };
+  } catch (error) {
+    if (CONNECTION_CODES.includes(error.code)) {
+      error.message = `Could not connect to the mail server (${error.code}). If this host blocks outbound SMTP (Render free instances block ports 25, 465 and 587), use a provider on port 2525 via CAMPAIGN_EMAIL_*.`;
+    }
+    throw error;
+  }
 };
 
 const verifyTransport = () => getTransporter().verify();
