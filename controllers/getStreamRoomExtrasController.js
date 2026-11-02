@@ -181,4 +181,31 @@ const shareChatPhoto = (kind) => async (req, res) => {
   }
 };
 
-module.exports = { giftOverview, sendGift, shareChatPhoto };
+/**
+ * Turn live captions on or off (hosts and co-hosts). Everyone in the room then
+ * sees them; each person can hide them on their own screen.
+ * POST .../:id/captions-getstream  { action: 'start' | 'stop' }
+ */
+const setCaptions = (kind) => async (req, res) => {
+  try {
+    const { action } = req.body || {};
+    if (!['start', 'stop'].includes(action)) {
+      return res.status(400).json({ success: false, message: "action must be 'start' or 'stop'" });
+    }
+    const loaded = await loadForUser(kind, req, res);
+    if (!loaded) return;
+    const { target, role } = loaded;
+    if (role !== 'host' && role !== 'cohost') {
+      return res.status(403).json({ success: false, message: 'Only the host can turn captions on or off' });
+    }
+    if (!target.isLive || !target.callId) {
+      return res.status(400).json({ success: false, message: 'Captions can be turned on while the class is live' });
+    }
+    const result = await getStreamService.setCaptions(target.callId, action);
+    return res.json({ success: true, data: result });
+  } catch (error) {
+    return fail(res, error, 'Failed to update captions');
+  }
+};
+
+module.exports = { giftOverview, sendGift, shareChatPhoto, setCaptions };

@@ -177,6 +177,28 @@ const broadcastSystemEvent = async (callId, custom) => {
   await getClient().video.call(CALL_TYPE, callId).sendCallEvent({ user_id: SYSTEM_USER_ID, custom });
 };
 
+/**
+ * Start or stop live captions for a call. Done server-side because the
+ * "default" call type doesn't grant hosts the caption permission. GetStream
+ * bills transcription while it runs, so only hosts can turn it on.
+ */
+const setCaptions = async (callId, action) => {
+  const call = getClient().video.call(CALL_TYPE, callId);
+  try {
+    if (action === 'start') await call.startClosedCaptions({});
+    else await call.stopClosedCaptions({});
+  } catch (error) {
+    const message = error.message || '';
+    if (/already/i.test(message)) return { captions: action === 'start' };
+    if (/not (running|started|in progress)|no active/i.test(message)) {
+      if (action === 'stop') return { captions: false };
+      throw new GetStreamError('Captions can start once you are connected to the class', 'NO_ACTIVE_SESSION', 409);
+    }
+    throw error;
+  }
+  return { captions: action === 'start' };
+};
+
 /** Drop a finished class's/session's chat photos, without delaying the response. */
 const cleanUpChatMediaLater = (target) => {
   const media = require('./liveChatMediaService');
@@ -353,7 +375,8 @@ module.exports = {
     endSeriesSession,
     setSeriesSessionRecording,
     listSeriesSessionRecordings,
-    broadcastSystemEvent
+    broadcastSystemEvent,
+    setCaptions
   },
   SYSTEM_USER_ID,
   GetStreamError,
