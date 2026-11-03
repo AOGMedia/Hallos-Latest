@@ -26,5 +26,6 @@ router.post(
   parseChatPhoto,
   roomExtras.shareChatPhoto('session')
 );
+router.post('/session/:id/captions-getstream', authMiddleware, roomExtras.setCaptions('session'));
 
 module.exports = router;

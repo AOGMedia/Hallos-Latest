@@ -20,5 +20,6 @@ router.get('/:id/recordings-getstream', authMiddleware, getStreamController.list
 router.get('/:id/gifts-getstream', authMiddleware, roomExtras.giftOverview('class'));
 router.post('/:id/gift-getstream', authMiddleware, giftRateLimit, roomExtras.sendGift('class'));
 router.post('/:id/chat-photo-getstream', authMiddleware, photoRateLimit, parseChatPhoto, roomExtras.shareChatPhoto('class'));
+router.post('/:id/captions-getstream', authMiddleware, roomExtras.setCaptions('class'));
 
 module.exports = router;
