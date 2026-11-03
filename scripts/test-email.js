@@ -1,45 +1,36 @@
 require('dotenv').config();
-const nodemailer = require('nodemailer');
+const mailTransport = require('../services/mailTransport');
 
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: parseInt(process.env.EMAIL_PORT),
-  secure: process.env.EMAIL_SECURE === 'true',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const recipient = process.argv[2] || 'sakariyauabdullateef993@gmail.com';
 
 async function run() {
-  console.log('Verifying SMTP connection...');
-  console.log(`  Host: ${process.env.EMAIL_HOST}`);
-  console.log(`  Port: ${process.env.EMAIL_PORT}`);
-  console.log(`  User: ${process.env.EMAIL_USER}`);
+  const target = mailTransport.describe();
+  console.log(`Provider: ${target.provider}`);
+  console.log(`  Host: ${target.host}`);
+  console.log(`  From: ${target.from}`);
 
-  await transporter.verify();
-  console.log('SMTP connection OK. Sending test email...');
+  const check = await mailTransport.verify();
+  console.log('Connection OK:', JSON.stringify(check));
 
-  const info = await transporter.sendMail({
+  const sentAt = new Date().toISOString();
+  const info = await mailTransport.sendMail({
     from: `"hallos Team" <${process.env.EMAIL_USER}>`,
-    to: 'osejialexander77@gmail.com',
-    subject: 'hallos Email Test — support@hallos.net',
+    to: recipient,
+    subject: `hallos email test (${target.provider})`,
     html: `
       <div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:24px">
         <h2 style="color:#1a1a1a">Email config test ✓</h2>
-        <p>This confirms the new email account is working correctly.</p>
+        <p>This confirms the backend can send email through <strong>${target.provider}</strong>.</p>
         <ul>
-          <li><strong>From:</strong> ${process.env.EMAIL_USER}</li>
-          <li><strong>Host:</strong> ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}</li>
-          <li><strong>Sent:</strong> ${new Date().toISOString()}</li>
+          <li><strong>Provider:</strong> ${target.provider}</li>
+          <li><strong>Sent:</strong> ${sentAt}</li>
         </ul>
-        <p style="color:#888;font-size:13px">hallos.net backend — test script</p>
       </div>
     `,
-    text: `Email config test. From: ${process.env.EMAIL_USER}. Host: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT}. Sent: ${new Date().toISOString()}`,
+    text: `Email config test through ${target.provider}. Sent: ${sentAt}`,
   });
 
-  console.log(`Email sent! Message ID: ${info.messageId}`);
+  console.log(`Email sent to ${recipient}! Message ID: ${info.messageId}`);
   process.exit(0);
 }
 
