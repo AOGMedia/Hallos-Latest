@@ -13,22 +13,12 @@
  */
 
 require('dotenv').config();
-const nodemailer = require('nodemailer');
 const { Sequelize } = require('sequelize');
 const sequelize = require('../config/db');
 const User = require('../models/User');
 
 // ─── Transporter (same config as utils/email.js) ────────────────────────────
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: process.env.EMAIL_PORT,
-  secure: process.env.EMAIL_SECURE === 'true',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-  tls: { rejectUnauthorized: false }
-});
+const transporter = require('../services/mailTransport');
 
 // ─── Social Footer (copied from utils/email.js) ──────────────────────────────
 const getSocialFooter = () => `

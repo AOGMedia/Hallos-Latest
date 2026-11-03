@@ -10,7 +10,7 @@ const MAX_ATTEMPTS = 3;
 const STUCK_AFTER_MINUTES = 5;
 const RATE_LIMIT_PAUSE_MS = 15 * 60 * 1000;
 const OUTAGE_PAUSE_MS = 5 * 60 * 1000;
-const OUTAGE_CODES = ['ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNRESET', 'EAUTH'];
+const OUTAGE_CODES = ['ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNRESET', 'EAUTH', 'EPROVIDER'];
 
 const sendDelayMs = () => parseInt(process.env.EMAIL_CAMPAIGN_DELAY_MS, 10) || 1500;
 
@@ -24,7 +24,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const classifyError = (error) => {
   const text = `${error.response || ''} ${error.message || ''}`;
   const code = error.responseCode;
-  if (/rate|limit|quota|too many|exceed/i.test(text) && (!code || code >= 400)) return 'rate_limit';
+  if (/rate|limit|quota|credit|too many|exceed/i.test(text) && (!code || code >= 400)) return 'rate_limit';
   if (OUTAGE_CODES.includes(error.code)) return 'outage';
   if (code >= 500 || error.code === 'EENVELOPE' || error.code === 'EMESSAGE') return 'permanent';
   return 'transient';
