@@ -16,11 +16,6 @@ const LAGOS_OFFSET_MS = HOUR_MS;
 
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 
-const getLimits = () => ({
-  hourlyCap: parseInt(process.env.EMAIL_CAMPAIGN_HOURLY_CAP, 10) || 300,
-  dailyCap: parseInt(process.env.EMAIL_CAMPAIGN_DAILY_CAP, 10) || 2000
-});
-
 const startOfLagosDay = (now = new Date()) => {
   const lagos = new Date(now.getTime() + LAGOS_OFFSET_MS);
   return new Date(Date.UTC(lagos.getUTCFullYear(), lagos.getUTCMonth(), lagos.getUTCDate()) - LAGOS_OFFSET_MS);
@@ -34,20 +29,13 @@ const countSentSince = async (since) => {
   return row.n;
 };
 
-/** How many more campaign emails may go out right now under the hourly and daily caps. */
+/** Sending is not capped; this only reports recent volume. Caps are 0 so older portal builds draw an empty meter. */
 const getSendCapacity = async (now = new Date()) => {
-  const { hourlyCap, dailyCap } = getLimits();
   const [sentLastHour, sentToday] = await Promise.all([
     countSentSince(new Date(now.getTime() - HOUR_MS)),
     countSentSince(startOfLagosDay(now))
   ]);
-  return {
-    hourlyCap,
-    dailyCap,
-    sentLastHour,
-    sentToday,
-    remaining: Math.max(Math.min(hourlyCap - sentLastHour, dailyCap - sentToday), 0)
-  };
+  return { unlimited: true, hourlyCap: 0, dailyCap: 0, sentLastHour, sentToday };
 };
 
 const cleanPayload = (payload = {}) => {
@@ -270,17 +258,9 @@ const sendCampaign = async (id, userId, { scheduledFor } = {}) => {
     );
   });
 
-  const { hourlyCap, dailyCap } = getLimits();
-  const perHour = Math.min(hourlyCap, dailyCap);
   return {
     campaign: await getCampaign(id),
-    estimate: {
-      recipients: recipients.length,
-      hourlyCap,
-      dailyCap,
-      estimatedHours: Math.ceil(recipients.length / perHour),
-      estimatedDays: Math.ceil(recipients.length / dailyCap)
-    }
+    estimate: { recipients: recipients.length, hourlyCap: 0, dailyCap: 0, estimatedHours: 1, estimatedDays: 1 }
   };
 };
 
@@ -381,7 +361,6 @@ const addSuppression = async (email, reason = 'unsubscribed') => {
 };
 
 module.exports = {
-  getLimits,
   getSendCapacity,
   cleanPayload,
   createCampaign,
