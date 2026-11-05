@@ -15,6 +15,11 @@ router.post('/session/:id/join-getstream', authMiddleware, getStreamSessionContr
 router.post('/session/:id/end-getstream', authMiddleware, getStreamSessionController.endSession);
 router.post('/session/:id/recording-getstream', authMiddleware, getStreamSessionController.setRecording);
 router.get('/session/:id/recordings-getstream', authMiddleware, getStreamSessionController.listRecordings);
+router.post(
+  '/session/:id/recordings-getstream/publish',
+  authMiddleware,
+  getStreamSessionController.publishRecording
+);
 
 // In-room extras: gifts to the host and photos in chat.
 router.get('/session/:id/gifts-getstream', authMiddleware, roomExtras.giftOverview('session'));

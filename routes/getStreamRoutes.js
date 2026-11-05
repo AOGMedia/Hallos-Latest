@@ -15,6 +15,7 @@ router.post('/:id/end-getstream', authMiddleware, getStreamController.endSession
 router.post('/:id/heartbeat-getstream', authMiddleware, getStreamController.heartbeat);
 router.post('/:id/recording-getstream', authMiddleware, getStreamController.setRecording);
 router.get('/:id/recordings-getstream', authMiddleware, getStreamController.listRecordings);
+router.post('/:id/recordings-getstream/publish', authMiddleware, getStreamController.publishRecording);
 
 // In-room extras: gifts to the host and photos in chat.
 router.get('/:id/gifts-getstream', authMiddleware, roomExtras.giftOverview('class'));
