@@ -32,5 +32,6 @@ router.post(
   roomExtras.shareChatPhoto('session')
 );
 router.post('/session/:id/captions-getstream', authMiddleware, roomExtras.setCaptions('session'));
+router.post('/session/:id/cohost-getstream', authMiddleware, getStreamSessionController.setCohost);
 
 module.exports = router;

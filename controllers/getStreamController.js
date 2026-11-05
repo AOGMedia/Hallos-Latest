@@ -3,6 +3,8 @@ const Purchase = require('../models/Purchase');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
 const recordingPublishService = require('../services/recordingPublishService');
+const getStreamCohostService = require('../services/getStreamCohostService');
+const recordedClassesService = require('../services/recordedClassesService');
 // Shared access rules (privacy, invitation codes, co-hosts). Only read here;
 // the ZegoCloud controller is not changed.
 const { enforcePrivacySettings } = require('./zegoCloudController');
@@ -215,6 +217,35 @@ exports.listRecordings = async (req, res) => {
     });
   } catch (error) {
     return handleError(res, error, 'Failed to load recordings');
+  }
+};
+
+/**
+ * Make someone a co-host of the live class, or remove the role (creator only).
+ * POST /live/:id/cohost-getstream  { userId, action: 'add' | 'remove' }
+ */
+exports.setCohost = async (req, res) => {
+  try {
+    const liveClass = await loadGetStreamClass(req, res);
+    if (!liveClass || !requireCreator(liveClass, req, res, 'change co-hosts')) return;
+
+    const result = await getStreamCohostService.setClassCohost(liveClass, req.body);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return handleError(res, error, 'Failed to update co-host');
+  }
+};
+
+/**
+ * The creator's ended GetStream classes that have recordings.
+ * GET /live/getstream/recorded-classes
+ */
+exports.listRecordedClasses = async (req, res) => {
+  try {
+    const classes = await recordedClassesService.listRecordedClasses(req.user.id);
+    return res.status(200).json({ success: true, data: { classes } });
+  } catch (error) {
+    return handleError(res, error, 'Failed to load recorded classes');
   }
 };
 
