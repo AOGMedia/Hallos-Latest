@@ -1,6 +1,7 @@
 const { LiveClass, LiveHost } = require('../models/liveIndex');
 const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const Purchase = require('../models/Purchase');
+const LiveSessionHost = require('../models/LiveSessionHost');
 const liveSeriesService = require('./liveSeriesService');
 const { seriesProviderOf } = require('../utils/liveProviders');
 
@@ -72,6 +73,8 @@ const resolveSession = async (id) => {
     currency: session.series.currency || 'NGN',
     roleOf: async (userId) => {
       if (session.series.userId === userId) return 'host';
+      // Co-host for this session (made one by the creator in the room).
+      if (await LiveSessionHost.findOne({ where: { sessionId: session.id, userId } })) return 'cohost';
       return (await liveSeriesService.checkSeriesAccess(userId, session.seriesId)) ? 'attendee' : null;
     }
   };

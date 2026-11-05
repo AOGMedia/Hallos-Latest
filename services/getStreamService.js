@@ -105,6 +105,15 @@ const promoteToHost = (callId, userId) =>
     update_members: [{ user_id: streamUserId(userId), role: HOST_CALL_ROLE }]
   });
 
+/**
+ * Make someone a host of a live call (co-host), or a regular participant
+ * again. Everyone's room follows call member roles, so it applies live.
+ */
+const setCallHost = (callId, userId, makeHost) =>
+  getClient().video.call(CALL_TYPE, callId).updateCallMembers({
+    update_members: [{ user_id: streamUserId(userId), role: makeHost ? HOST_CALL_ROLE : PARTICIPANT_CALL_ROLE }]
+  });
+
 /** End a call for everyone; also stops any recording. Missing/ended calls are fine. */
 const endCall = async (callId) => {
   try {
@@ -336,11 +345,13 @@ const startSeriesSession = async (session, series, creator) => {
   return { alreadyLive: false, ...credentialsFor(callId, creator.id, true) };
 };
 
-/** A participant joins a live series session. */
-const joinSeriesSession = async (session, user, { isHost }) => {
+/** A participant (or co-host) joins a live series session. */
+const joinSeriesSession = async (session, user, { isHost, isCohost = false }) => {
   if (session.status !== 'live') throw new GetStreamError(SESSION_NOT_LIVE, 'SESSION_NOT_ACTIVE', 400);
   await upsertUser(user);
-  return credentialsFor(String(session.id), user.id, isHost);
+  // A co-host rejoining gets host rights back (the creator already has them).
+  if (isCohost) await promoteToHost(String(session.id), user.id);
+  return credentialsFor(String(session.id), user.id, isHost || isCohost);
 };
 
 /** End a series session for everyone. */
@@ -357,6 +368,14 @@ const endSeriesSession = async (session) => {
 const setSeriesSessionRecording = async (session, action) => {
   if (session.status !== 'live') throw new GetStreamError(SESSION_NOT_LIVE, 'SESSION_NOT_ACTIVE', 400);
   return recordCall(String(session.id), action);
+};
+
+/** Whether any session of the class was recorded (newest first, stops at the first one found). */
+const classHasRecordings = async (liveClass) => {
+  for (let session = sessionNumberOf(liveClass.id, liveClass.getstream_call_id); session >= 1; session--) {
+    if ((await recordingsOfCall(callIdFor(liveClass.id, session), session)).length) return true;
+  }
+  return false;
 };
 
 const listSeriesSessionRecordings = async (session) =>
@@ -376,7 +395,9 @@ module.exports = {
     setSeriesSessionRecording,
     listSeriesSessionRecordings,
     broadcastSystemEvent,
-    setCaptions
+    setCaptions,
+    setCallHost,
+    classHasRecordings
   },
   SYSTEM_USER_ID,
   GetStreamError,

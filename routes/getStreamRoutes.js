@@ -9,6 +9,9 @@ const { giftRateLimit, photoRateLimit, parseChatPhoto } = require('../middleware
  * GetStream live class routes, mounted at /live next to liveRoutes.
  * Every path is GetStream-specific, so none overlap the ZegoCloud routes.
  */
+// Two segments, so it can't be mistaken for GET /live/:id (liveRoutes).
+router.get('/getstream/recorded-classes', authMiddleware, getStreamController.listRecordedClasses);
+
 router.post('/:id/start-getstream', authMiddleware, getStreamController.startSession);
 router.post('/:id/join-getstream', authMiddleware, getStreamController.joinSession);
 router.post('/:id/end-getstream', authMiddleware, getStreamController.endSession);
@@ -22,5 +25,6 @@ router.get('/:id/gifts-getstream', authMiddleware, roomExtras.giftOverview('clas
 router.post('/:id/gift-getstream', authMiddleware, giftRateLimit, roomExtras.sendGift('class'));
 router.post('/:id/chat-photo-getstream', authMiddleware, photoRateLimit, parseChatPhoto, roomExtras.shareChatPhoto('class'));
 router.post('/:id/captions-getstream', authMiddleware, roomExtras.setCaptions('class'));
+router.post('/:id/cohost-getstream', authMiddleware, getStreamController.setCohost);
 
 module.exports = router;

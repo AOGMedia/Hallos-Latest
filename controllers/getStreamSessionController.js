@@ -3,6 +3,7 @@ const liveSeriesService = require('../services/liveSeriesService');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
 const recordingPublishService = require('../services/recordingPublishService');
+const getStreamCohostService = require('../services/getStreamCohostService');
 const { seriesProviderOf } = require('../utils/liveProviders');
 
 /**
@@ -80,7 +81,9 @@ exports.joinSession = async (req, res) => {
 
     const userId = req.user.id;
     const isCreator = session.series.userId === userId;
-    if (!isCreator) {
+    // Made a co-host earlier in this session (they keep it if they rejoin).
+    const isCohost = !isCreator && (await getStreamCohostService.isSessionCohost(session.id, userId));
+    if (!isCreator && !isCohost) {
       const hasAccess = await liveSeriesService.checkSeriesAccess(userId, session.seriesId);
       if (!hasAccess) {
         return res.status(402).json({
@@ -95,14 +98,17 @@ exports.joinSession = async (req, res) => {
     }
 
     const user = await User.findByPk(userId);
-    const credentials = await getStreamService.joinSeriesSession(session, user || { id: userId }, { isHost: isCreator });
+    const credentials = await getStreamService.joinSeriesSession(session, user || { id: userId }, {
+      isHost: isCreator,
+      isCohost
+    });
 
     return res.status(200).json({
       success: true,
       message: 'Successfully joined session',
       data: {
         ...credentials,
-        userType: isCreator ? 'creator' : 'participant',
+        userType: isCreator ? 'creator' : isCohost ? 'cohost' : 'participant',
         userName: user ? `${user.firstname || ''} ${user.lastname || ''}`.trim() : '',
         liveClass: { id: session.id, title: sessionTitle(session) }
       }
@@ -163,6 +169,22 @@ exports.listRecordings = async (req, res) => {
     return res.status(200).json({ success: true, data: { recordings, canPublish: true, title: sessionTitle(session) } });
   } catch (error) {
     return handleError(res, error, 'Failed to load recordings');
+  }
+};
+
+/**
+ * Make someone a co-host for this session only, or remove the role (creator only).
+ * POST /api/live/series/session/:id/cohost-getstream  { userId, action: 'add' | 'remove' }
+ */
+exports.setCohost = async (req, res) => {
+  try {
+    const session = await loadGetStreamSession(req, res);
+    if (!session || !requireCreator(session, req, res, 'change co-hosts')) return;
+
+    const result = await getStreamCohostService.setSessionCohost(session, req.body);
+    return res.status(200).json({ success: true, data: result });
+  } catch (error) {
+    return handleError(res, error, 'Failed to update co-host');
   }
 };
 
