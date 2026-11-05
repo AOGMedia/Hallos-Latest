@@ -12,7 +12,7 @@ const RATE_LIMIT_PAUSE_MS = 15 * 60 * 1000;
 const OUTAGE_PAUSE_MS = 5 * 60 * 1000;
 const OUTAGE_CODES = ['ECONNECTION', 'ETIMEDOUT', 'ESOCKET', 'EDNS', 'ECONNRESET', 'EAUTH', 'EPROVIDER'];
 
-const sendDelayMs = () => parseInt(process.env.EMAIL_CAMPAIGN_DELAY_MS, 10) || 1500;
+const sendDelayMs = () => parseInt(process.env.EMAIL_CAMPAIGN_DELAY_MS, 10) || 100;
 
 let timer = null;
 let running = false;
@@ -153,10 +153,7 @@ const tick = async () => {
     const campaign = await EmailCampaign.findOne({ where: { status: 'sending' }, order: [['startedAt', 'ASC']] });
     if (!campaign) return;
 
-    const capacity = await campaignService.getSendCapacity();
-    if (capacity.remaining <= 0) return;
-
-    const batch = await claimBatch(campaign.id, Math.min(BATCH_SIZE, capacity.remaining));
+    const batch = await claimBatch(campaign.id, BATCH_SIZE);
     if (!batch.length) {
       await finalizeIfDone(campaign.id);
       return;
@@ -179,7 +176,7 @@ const start = () => {
   }
   timer = setInterval(tick, TICK_MS);
   timer.unref();
-  console.log(`✅ Email campaign worker started (tick ${TICK_MS / 1000}s, limits ${JSON.stringify(campaignService.getLimits())})`);
+  console.log(`✅ Email campaign worker started (tick ${TICK_MS / 1000}s, no volume cap)`);
 };
 
 const stop = () => {
