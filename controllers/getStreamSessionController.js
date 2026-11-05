@@ -2,6 +2,7 @@ const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const liveSeriesService = require('../services/liveSeriesService');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
+const recordingPublishService = require('../services/recordingPublishService');
 const { seriesProviderOf } = require('../utils/liveProviders');
 
 /**
@@ -153,9 +154,37 @@ exports.listRecordings = async (req, res) => {
     const session = await loadGetStreamSession(req, res);
     if (!session || !requireCreator(session, req, res, 'view recordings')) return;
 
-    const recordings = await getStreamService.listSeriesSessionRecordings(session);
-    return res.status(200).json({ success: true, data: { recordings } });
+    const recordings = await recordingPublishService.withPublications(
+      'session',
+      session.id,
+      await getStreamService.listSeriesSessionRecordings(session)
+    );
+    // Only the creator gets this far (requireCreator above).
+    return res.status(200).json({ success: true, data: { recordings, canPublish: true, title: sessionTitle(session) } });
   } catch (error) {
     return handleError(res, error, 'Failed to load recordings');
+  }
+};
+
+/**
+ * Publish one of the session's recordings as a Hallos video (creator only).
+ * POST /api/live/series/session/:id/recordings-getstream/publish
+ *   { filename, title, description?, price?, currency?, category?, privacy?, tags? }
+ */
+exports.publishRecording = async (req, res) => {
+  try {
+    const session = await loadGetStreamSession(req, res);
+    if (!session || !requireCreator(session, req, res, 'publish recordings')) return;
+
+    const result = await recordingPublishService.publishRecording({
+      sourceType: 'session',
+      sourceId: session.id,
+      recordings: await getStreamService.listSeriesSessionRecordings(session),
+      userId: req.user.id,
+      body: req.body
+    });
+    return res.status(result.alreadyPublished ? 200 : 201).json({ success: true, data: result });
+  } catch (error) {
+    return handleError(res, error, 'Failed to publish recording');
   }
 };

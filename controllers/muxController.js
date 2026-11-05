@@ -1,6 +1,7 @@
 const Mux = require("@mux/mux-node");
 const Video = require("../models/Video");
 const LiveClass = require("../models/liveClass");
+const recordingPublishService = require("../services/recordingPublishService");
 
 const endpointSecret = process.env.MUX_WEBHOOK_SECRET;
 
@@ -40,6 +41,11 @@ exports.handleMuxWebhook = async (req, res) => {
   const { type, data } = event;
 
   try {
+    // ---------------- PUBLISHED CLASS RECORDINGS ----------------
+    // Assets imported from a GetStream recording (no upload_id, tagged with a
+    // passthrough); every other event falls through to the handlers below.
+    await recordingPublishService.handleMuxAssetEvent(type, data);
+
     // ---------------- VIDEO ASSET EVENTS ----------------
     if (type === "video.asset.ready" && data.upload_id && !data.live_stream_id) {
       const playbackId = data.playback_ids?.[0]?.id || null;

@@ -2,6 +2,7 @@ const { LiveClass, LiveHost } = require('../models/liveIndex');
 const Purchase = require('../models/Purchase');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
+const recordingPublishService = require('../services/recordingPublishService');
 // Shared access rules (privacy, invitation codes, co-hosts). Only read here;
 // the ZegoCloud controller is not changed.
 const { enforcePrivacySettings } = require('./zegoCloudController');
@@ -202,9 +203,40 @@ exports.listRecordings = async (req, res) => {
       }
     }
 
-    const recordings = await getStreamService.listRecordings(liveClass);
-    return res.status(200).json({ success: true, data: { recordings } });
+    const recordings = await recordingPublishService.withPublications(
+      'class',
+      liveClass.id,
+      await getStreamService.listRecordings(liveClass)
+    );
+    // Co-hosts can watch recordings; only the creator can publish them.
+    return res.status(200).json({
+      success: true,
+      data: { recordings, canPublish: liveClass.userId === req.user.id, title: liveClass.title || null }
+    });
   } catch (error) {
     return handleError(res, error, 'Failed to load recordings');
+  }
+};
+
+/**
+ * Publish one of the class's recordings as a Hallos video (creator only).
+ * POST /live/:id/recordings-getstream/publish
+ *   { filename, title, description?, price?, currency?, category?, privacy?, tags? }
+ */
+exports.publishRecording = async (req, res) => {
+  try {
+    const liveClass = await loadGetStreamClass(req, res);
+    if (!liveClass || !requireCreator(liveClass, req, res, 'publish recordings')) return;
+
+    const result = await recordingPublishService.publishRecording({
+      sourceType: 'class',
+      sourceId: liveClass.id,
+      recordings: await getStreamService.listRecordings(liveClass),
+      userId: req.user.id,
+      body: req.body
+    });
+    return res.status(result.alreadyPublished ? 200 : 201).json({ success: true, data: result });
+  } catch (error) {
+    return handleError(res, error, 'Failed to publish recording');
   }
 };
