@@ -23,6 +23,17 @@ exports.getMyCode = async (req, res) => {
 };
 
 /**
+ * POST /api/referral/claim-signup  { ref }
+ * Credit the partner whose link brought in this brand-new account, for
+ * sign-ups that couldn't carry the code themselves (Google). Always answers
+ * 200: the client sends it in the background and never shows a result.
+ */
+exports.claimSignup = async (req, res) => {
+  const result = await referralService.claimSignupReferral(req.user.id, req.body && req.body.ref);
+  return res.status(200).json({ success: true, ...result });
+};
+
+/**
  * GET /api/referral/my-stats
  * Get the authenticated partner's referral stats.
  */
