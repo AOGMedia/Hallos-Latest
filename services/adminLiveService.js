@@ -1,6 +1,7 @@
 const { col, fn, Op } = require('sequelize');
 const User = require('../models/User');
 const { avatarUrlOf } = require('../utils/userAvatar');
+const { countAudience, listAudience } = require('../utils/audienceQueries');
 
 /**
  * Admin view of live classes and live series, and the force stop.
@@ -112,8 +113,8 @@ async function getOverview() {
   const sessions = liveSessions.map((row) => row.get({ plain: true }));
   const [people, attendees, registrations] = await Promise.all([
     peopleById([...liveClasses.map((c) => c.userId), ...sessions.map((s) => s.series?.userId)]),
-    safe('attendees', () => countBy(m.LiveAttendee, 'liveClassId', liveClasses.map((c) => c.id)), new Map()),
-    safe('registrations', () => countBy(m.LiveSeriesRegistration, 'seriesId', sessions.map((s) => s.seriesId)), new Map()),
+    safe('attendees', () => countAudience('class', liveClasses.map((c) => c.id)), new Map()),
+    safe('registrations', () => countAudience('series', sessions.map((s) => s.seriesId)), new Map()),
   ]);
 
   return {
@@ -160,7 +161,7 @@ async function listClasses(query) {
   const ids = rows.map((row) => row.id);
   const [people, attendees] = await Promise.all([
     peopleById(rows.map((row) => row.userId)),
-    safe('attendees', () => countBy(m.LiveAttendee, 'liveClassId', ids), new Map()),
+    safe('attendees', () => countAudience('class', ids), new Map()),
   ]);
   return {
     items: rows.map((row) => ({
@@ -178,7 +179,7 @@ async function getClass(id) {
   if (!liveClass) return null;
 
   const [attendees, hosts, revenue, gifts, community] = await Promise.all([
-    safe('attendees', () => m.LiveAttendee.findAll({ where: { liveClassId: id }, order: [['createdAt', 'DESC']], limit: 200, raw: true }), []),
+    safe('attendees', () => listAudience('class', id), []),
     safe('hosts', () => m.LiveHost.findAll({ where: { liveClassId: id }, raw: true }), []),
     safe('revenue', () => revenueFor('live_class', id, m), []),
     safe('gifts', async () => (await m.LiveGift.findAll({
@@ -200,9 +201,9 @@ async function getClass(id) {
     hosts: hosts.map((host) => ({ role: host.role, person: people.get(host.userId) ?? null })),
     attendeeCount: attendees.length,
     attendees: attendees.map((row) => ({
-      id: row.id,
-      paid: Boolean(row.statusPaid),
-      joinedAt: row.createdAt,
+      id: String(row.userId),
+      paid: row.paid,
+      joinedAt: row.joinedAt,
       person: people.get(row.userId) ?? null,
     })),
     revenue,
@@ -226,7 +227,7 @@ async function listSeries(query) {
   const ids = rows.map((row) => row.id);
   const [people, students, sessions, live] = await Promise.all([
     peopleById(rows.map((row) => row.userId)),
-    safe('students', () => countBy(m.LiveSeriesRegistration, 'seriesId', ids), new Map()),
+    safe('students', () => countAudience('series', ids), new Map()),
     safe('sessions', () => countBy(m.LiveSession, 'seriesId', ids), new Map()),
     safe('live sessions', () => countBy(m.LiveSession, 'seriesId', ids, { status: 'live' }), new Map()),
   ]);
@@ -253,7 +254,7 @@ async function getSeries(id) {
       order: [['sessionNumber', 'ASC']],
       raw: true,
     }), []),
-    safe('registrations', () => m.LiveSeriesRegistration.findAll({ where: { seriesId: id }, order: [['createdAt', 'DESC']], limit: 200, raw: true }), []),
+    safe('registrations', () => listAudience('series', id), []),
     safe('revenue', () => revenueFor('live_series', id, m), []),
     safe('community', () => (series.communityId
       ? m.Community.findByPk(series.communityId, { attributes: ['id', 'name'], raw: true })
@@ -266,7 +267,12 @@ async function getSeries(id) {
     community,
     sessions,
     studentCount: registrations.length,
-    students: registrations.map((row) => ({ id: row.id, joinedAt: row.createdAt, person: people.get(row.userId) ?? null })),
+    students: registrations.map((row) => ({
+      id: String(row.userId),
+      paid: row.paid,
+      joinedAt: row.joinedAt,
+      person: people.get(row.userId) ?? null,
+    })),
     revenue,
   };
 }

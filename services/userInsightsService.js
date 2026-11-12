@@ -3,6 +3,7 @@ const User = require('../models/User');
 const { avatarUrlOf } = require('../utils/userAvatar');
 const { LIST_LIMIT, safe, select, recent, namesById, totalsByCurrency } = require('../utils/insightQueries');
 const { loadDetails } = require('./userInsightsDetails');
+const { listForUser } = require('../utils/audienceQueries');
 
 const EVENTS_PER_SOURCE = 50;
 const MAX_EVENTS = 200;
@@ -195,12 +196,11 @@ async function loadMoney(id, m) {
 }
 
 async function loadLearning(id, m) {
-  const [joined, attended, seriesCount, seriesRows, courseCount, courseRows, videoStats, viewRows, freebies] =
+  // Free sign-ups and paid purchases together; paid ones have no attendee row.
+  const [classesJoined, seriesJoined, courseCount, courseRows, videoStats, viewRows, freebies] =
     await Promise.all([
-      safe('live count', () => m.LiveAttendee.count({ where: { userId: id } }), 0),
-      safe('live classes', () => recent(m.LiveAttendee, { userId: id }), []),
-      safe('series count', () => m.LiveSeriesRegistration.count({ where: { userId: id } }), 0),
-      safe('series', () => recent(m.LiveSeriesRegistration, { userId: id }), []),
+      safe('live classes', () => listForUser('class', id), { total: 0, items: [] }),
+      safe('series', () => listForUser('series', id), { total: 0, items: [] }),
       safe('course count', () => m.CourseEnrollment.count({ where: { userId: id } }), 0),
       safe('courses', () => recent(m.CourseEnrollment, { userId: id }), []),
       safe('watch stats', async () => (await m.VideoView.findAll({
@@ -213,24 +213,27 @@ async function loadLearning(id, m) {
     ]);
 
   const [classNames, seriesNames, courseNames, videoNames] = await Promise.all([
-    safe('class names', () => namesById(m.LiveClass, attended.map((row) => row.liveClassId)), new Map()),
-    safe('series names', () => namesById(m.LiveSeries, seriesRows.map((row) => row.seriesId)), new Map()),
+    safe('class names', () => namesById(m.LiveClass, classesJoined.items.map((row) => row.contentId)), new Map()),
+    safe('series names', () => namesById(m.LiveSeries, seriesJoined.items.map((row) => row.contentId)), new Map()),
     safe('course names', () => namesById(m.Course, courseRows.map((row) => row.courseId), 'name'), new Map()),
     safe('video names', () => namesById(m.Video, viewRows.map((row) => row.videoId)), new Map()),
   ]);
 
   return {
     learning: {
-      liveClassesJoined: joined,
-      liveClasses: attended.map((row) => ({
-        id: row.id,
-        title: classNames.get(row.liveClassId) ?? null,
-        paid: Boolean(row.statusPaid),
-        joinedAt: row.createdAt,
+      liveClassesJoined: classesJoined.total,
+      liveClasses: classesJoined.items.map((row) => ({
+        id: row.contentId,
+        title: classNames.get(row.contentId) ?? null,
+        paid: row.paid,
+        joinedAt: row.joinedAt,
       })),
-      seriesEnrolled: seriesCount,
-      series: seriesRows.map((row) => ({
-        id: row.id, title: seriesNames.get(row.seriesId) ?? null, joinedAt: row.createdAt,
+      seriesEnrolled: seriesJoined.total,
+      series: seriesJoined.items.map((row) => ({
+        id: row.contentId,
+        title: seriesNames.get(row.contentId) ?? null,
+        paid: row.paid,
+        joinedAt: row.joinedAt,
       })),
       coursesEnrolled: courseCount,
       courses: courseRows.map((row) => ({
