@@ -413,6 +413,47 @@ exports.sendPasswordResetOTP = async (to, firstname, otp) => {
 };
 
 /**
+ * SIGN-UP EMAIL VERIFICATION CODE
+ */
+exports.sendSignupVerificationCode = async (to, firstname, code, expiresInMinutes) => {
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>Verify your email</h2>
+
+      <p>Hi ${firstname},</p>
+
+      <p>
+        Thanks for signing up to hallos. Enter this code to confirm your email
+        and finish creating your account:
+      </p>
+
+      <div style="background-color: #f4f4f4; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
+        <h1 style="color: #333; font-size: 32px; letter-spacing: 8px; margin: 0;">
+          ${code}
+        </h1>
+      </div>
+
+      <ul>
+        <li>This code expires in <strong>${expiresInMinutes} minutes</strong></li>
+        <li>Do not share this code with anyone</li>
+        <li>If you didn't try to sign up, you can ignore this email — no account will be created</li>
+      </ul>
+
+      <p><strong>The hallos Team</strong></p>
+
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `${code} is your hallos verification code`,
+    html,
+  });
+};
+
+/**
  * WITHDRAWAL CONFIRMATION OTP EMAIL
  */
 exports.sendWithdrawalOTP = async (to, firstname, otp, amount, currency, bankAccount) => {

@@ -4,57 +4,121 @@ const { validationResult } = require('express-validator');
 const User = require('../models/User');
 const { avatarUrlOf } = require('../utils/userAvatar');
 const { recordLogin } = require('../services/userLoginService');
+const signupVerification = require('../services/signupVerificationService');
+const { SignupError } = signupVerification;
 const SECRET_KEY = process.env.JWT_SECRET_KEY;
 
-exports.signup = async (req, res) => {
-  const { firstname, lastname, email, password, confirmPassword } = req.body;
-  
+const sendSignupError = (res, error, fallback) => {
+  if (error instanceof SignupError) {
+    return res.status(error.status).json({ success: false, message: error.message, code: error.code, ...error.details });
+  }
+  console.error(`[Auth] ${fallback}:`, error);
+  return res.status(500).json({ success: false, message: 'Server error' });
+};
+
+/** After the account is created: referral link, quiz invite, login token. */
+const finishSignup = (req, user, { referralCode, quizInviteToken }) => {
+  // Fire-and-forget referral linking (never blocks signup)
+  if (referralCode) {
+    const referralService = require('../services/referralService');
+    referralService.linkCreatorAtSignup(user.id, referralCode).catch(err => {
+      console.error('[Auth] Referral linking failed (non-critical):', err.message);
+    });
+  }
+
+  // Fire-and-forget quiz invite claim (never blocks signup). This is a
+  // belt-and-suspenders convenience — the frontend should also call
+  // POST /api/quiz/invite/claim explicitly once it has a session, since
+  // that path also covers login and OAuth, which this hook doesn't.
+  if (quizInviteToken) {
+    const quizInviteService = require('../services/quizInviteService');
+    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip;
+    quizInviteService.claimInvite({ token: quizInviteToken, inviteeUserId: user.id, ip }).catch(err => {
+      console.error('[Auth] Quiz invite claim failed (non-critical):', err.message);
+    });
+  }
+
+  return jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1d' });
+};
+
+/**
+ * The old one-step sign-up. Signing up now needs the email verified first
+ * (POST /auth/signup/start, then /auth/signup/verify), so an out-of-date page
+ * or app version gets a clear message instead of an unverified account.
+ */
+exports.signup = (req, res) => {
+  res.status(400).json({
+    success: false,
+    code: 'EMAIL_VERIFICATION_REQUIRED',
+    message: 'Signing up now needs a quick email check. Please refresh the page, or update the app, and try again.'
+  });
+};
+
+/**
+ * Sign-up step 1: check the details and email a 6-digit code.
+ * POST /auth/signup/start
+ */
+exports.signupStart = async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     return res.status(400).json({ errors: errors.array() });
   }
+  const { firstname, lastname, email, password, confirmPassword } = req.body;
+  if (password !== confirmPassword) {
+    return res.status(400).json({ message: 'Passwords must match' });
+  }
 
   try {
-    const userExists = await User.findOne({ where: { email } });
-    if (userExists) {
-      return res.status(400).json({ message: 'User already exists' });
-    }
+    const result = await signupVerification.startSignup({
+      firstname,
+      lastname,
+      email,
+      password,
+      referralCode: req.body.ref || req.query.ref,
+      quizInviteToken: req.body.quizInviteToken || req.query.quizInviteToken
+    });
+    res.status(200).json({ success: true, verificationRequired: true, message: 'We sent a code to your email.', ...result });
+  } catch (error) {
+    sendSignupError(res, error, 'Signup start error');
+  }
+};
 
-    if (password !== confirmPassword) {
-      return res.status(400).json({ message: 'Passwords must match' });
-    }
+/**
+ * Send a new sign-up code.
+ * POST /auth/signup/resend  { email }
+ */
+exports.signupResend = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  try {
+    const result = await signupVerification.resendCode({ email: req.body.email });
+    res.status(200).json({ success: true, message: 'We sent you a new code.', ...result });
+  } catch (error) {
+    sendSignupError(res, error, 'Signup resend error');
+  }
+};
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = await User.create({ firstname, lastname, email, password: hashedPassword });
-
-    // Fire-and-forget referral linking (never blocks signup)
-    const refCode = req.body.ref || req.query.ref;
-    if (refCode) {
-      const referralService = require('../services/referralService');
-      referralService.linkCreatorAtSignup(newUser.id, refCode).catch(err => {
-        console.error('[Auth] Referral linking failed (non-critical):', err.message);
-      });
-    }
-
-    // Fire-and-forget quiz invite claim (never blocks signup). This is a
-    // belt-and-suspenders convenience — the frontend should also call
-    // POST /api/quiz/invite/claim explicitly once it has a session, since
-    // that path also covers login and OAuth, which this hook doesn't.
-    const quizInviteToken = req.body.quizInviteToken || req.query.quizInviteToken;
-    if (quizInviteToken) {
-      const quizInviteService = require('../services/quizInviteService');
-      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip;
-      quizInviteService.claimInvite({ token: quizInviteToken, inviteeUserId: newUser.id, ip }).catch(err => {
-        console.error('[Auth] Quiz invite claim failed (non-critical):', err.message);
-      });
-    }
-
-    const token = jwt.sign({ id: newUser.id, role: newUser.role }, SECRET_KEY, { expiresIn: '1d' });
-
+/**
+ * Sign-up step 2: the right code creates the account and logs them in.
+ * Same response as sign-up has always given.
+ * POST /auth/signup/verify  { email, code }
+ */
+exports.signupVerify = async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+  try {
+    const { user, referralCode, quizInviteToken } = await signupVerification.verifySignup({
+      email: req.body.email,
+      code: req.body.code
+    });
+    const token = finishSignup(req, user, { referralCode, quizInviteToken });
     res.status(201).json({ message: 'User created successfully', token });
   } catch (error) {
-    console.error('[Auth] Signup error:', error);
-    res.status(500).json({ message: 'Server error' });
+    sendSignupError(res, error, 'Signup verify error');
   }
 };
 

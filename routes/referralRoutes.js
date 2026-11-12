@@ -13,6 +13,9 @@ router.get('/my-code', authMiddleware, referralController.getMyCode);
 // GET /api/referral/my-stats
 router.get('/my-stats', authMiddleware, referralController.getMyStats);
 
+// POST /api/referral/claim-signup — credits a partner for a new Google sign-up
+router.post('/claim-signup', authMiddleware, referralController.claimSignup);
+
 // ==================== ADMIN ROUTES ====================
 
 // POST /api/referral/admin/codes

@@ -3,8 +3,9 @@ const { recordLogin } = require('../services/userLoginService');
 const passport = require('passport');
 const { body } = require('express-validator');
 const jwt = require('jsonwebtoken');
-const { signup, login, getMe } = require('../controllers/authController');
+const { signup, signupStart, signupResend, signupVerify, login, getMe } = require('../controllers/authController');
 const rateLimiter = require('../middleware/rateLimiter');
+const { signupCodeLimiter, signupVerifyLimiter } = require('../middleware/signupLimits');
 const authMiddleware = require('../middleware/authMiddleware');
 const { googleStrategy } = require('../services/oauthService');
 
@@ -13,14 +14,24 @@ const router = express.Router();
 // Initialize Passport Google Strategy
 passport.use(googleStrategy);
 
-// Local Signup Route
-router.post('/signup', [
-  body('firstname').not().isEmpty().withMessage('First name is required'),
-  body('lastname').not().isEmpty().withMessage('Last name is required'),
-  body('email').isEmail().withMessage('Invalid email address'),
+// Old one-step sign-up: now answers "please refresh / update" (email must be verified first).
+router.post('/signup', signup);
+
+// Email-verified sign-up: details + emailed code, then the code creates the account.
+router.post('/signup/start', signupCodeLimiter, [
+  body('firstname').trim().not().isEmpty().withMessage('First name is required'),
+  body('lastname').trim().not().isEmpty().withMessage('Last name is required'),
+  body('email').trim().isEmail().withMessage('Invalid email address'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('confirmPassword').custom((value, { req }) => value === req.body.password).withMessage('Passwords must match')
-], signup);
+], signupStart);
+router.post('/signup/resend', signupCodeLimiter, [
+  body('email').trim().isEmail().withMessage('Invalid email address')
+], signupResend);
+router.post('/signup/verify', signupVerifyLimiter, [
+  body('email').trim().isEmail().withMessage('Invalid email address'),
+  body('code').not().isEmpty().withMessage('Enter the code from your email')
+], signupVerify);
 
 // Local Login Route
 router.post('/login', [

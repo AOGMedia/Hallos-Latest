@@ -6,6 +6,9 @@ const UserReferral = require('../models/UserReferral');
 const ReferralCommission = require('../models/ReferralCommission');
 const User = require('../models/User');
 
+/** How new an account must be to be credited to a partner after sign-up. */
+const SIGNUP_CLAIM_WINDOW_MS = 30 * 60 * 1000;
+
 class ReferralService {
   /**
    * Generate a random uppercase alphanumeric string 8–12 chars using crypto.
@@ -217,6 +220,7 @@ class ReferralService {
 
   /**
    * Link a creator to a referral code at signup. Never throws.
+   * @returns {Promise<boolean>} whether a new link was made
    */
   async linkCreatorAtSignup(creatorUserId, refCode) {
     try {
@@ -229,7 +233,7 @@ class ReferralService {
         }
       });
 
-      if (!code) return;
+      if (!code) return false;
 
       await UserReferral.create({
         creatorUserId,
@@ -242,10 +246,45 @@ class ReferralService {
 
       // Increment successful_referrals counter on the code
       await code.increment('successfulReferrals');
+      return true;
     } catch (err) {
       // Unique constraint violation (creator already linked) — silent
-      if (err.name === 'SequelizeUniqueConstraintError') return;
+      if (err.name === 'SequelizeUniqueConstraintError') return false;
       console.error('[ReferralService] linkCreatorAtSignup error (non-critical):', err.message);
+      return false;
+    }
+  }
+
+  /**
+   * Credit a partner for a sign-up that couldn't carry the referral code
+   * itself (Google sign-up: the code waits in the browser and is sent right
+   * after the first login). Only brand-new accounts qualify, so an existing
+   * user can't attach themselves to a partner later; the partner can't
+   * refer themselves; and an account already linked stays as it is.
+   * Never throws.
+   * @returns {Promise<{ linked: boolean, reason?: string }>}
+   */
+  async claimSignupReferral(userId, refCode) {
+    try {
+      const code = String(refCode || '').trim();
+      if (!code || code.length > 100) return { linked: false, reason: 'INVALID_CODE' };
+
+      const user = await User.findByPk(userId, { attributes: ['id', 'createdAt'] });
+      if (!user) return { linked: false, reason: 'NO_USER' };
+      if (Date.now() - new Date(user.createdAt).getTime() > SIGNUP_CLAIM_WINDOW_MS) {
+        return { linked: false, reason: 'NOT_NEW' };
+      }
+
+      const referral = await ReferralCode.findOne({ where: { referralCode: code }, attributes: ['partnerUserId'] });
+      if (referral && Number(referral.partnerUserId) === Number(userId)) {
+        return { linked: false, reason: 'OWN_CODE' };
+      }
+
+      const linked = await this.linkCreatorAtSignup(userId, code);
+      return linked ? { linked: true } : { linked: false, reason: 'NOT_LINKED' };
+    } catch (err) {
+      console.error('[ReferralService] claimSignupReferral error (non-critical):', err.message);
+      return { linked: false, reason: 'ERROR' };
     }
   }
 
