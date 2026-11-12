@@ -7,6 +7,8 @@ const Video = require('../models/Video');
 const LiveClass = require('../models/liveClass');
 const Course = require('../models/Course');
 const CourseEnrollment = require('../models/CourseEnrollment');
+const { withAvatar } = require('../utils/userAvatar');
+const { lastLoginsFor } = require('../services/userLoginService');
 
 /**
  * Admin Dashboard Controller
@@ -179,15 +181,19 @@ exports.getUsers = async (req, res) => {
 
     const { count, rows } = await User.findAndCountAll({
       where,
-      attributes: ['id', 'firstname', 'lastname', 'email', 'role', 'country', 'createdAt'],
+      attributes: ['id', 'firstname', 'lastname', 'email', 'role', 'country', 'createdAt', 'socialLinks'],
       order: [['createdAt', 'DESC']],
       limit: Math.min(parseInt(limit), 100),
       offset,
     });
+    const lastLogins = await lastLoginsFor(rows.map((row) => row.id));
 
     return res.status(200).json({
       success: true,
-      users: rows,
+      users: rows.map((row) => {
+        const { socialLinks, ...user } = withAvatar(row.get({ plain: true }));
+        return { ...user, lastLoginAt: lastLogins.get(row.id) ?? null };
+      }),
       pagination: {
         total: count,
         page: parseInt(page),

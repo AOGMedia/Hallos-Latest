@@ -3,10 +3,11 @@ const express = require('express');
 const router = express.Router();
 const ctrl = require('../controllers/adminCommunityController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
+const { COMMUNITY_ROUTE_PERMISSIONS } = require('../config/staffRouteAccess');
 
 router.use(authMiddleware);
-router.use(adminMiddleware);
+router.use(requirePermission.byRoute(COMMUNITY_ROUTE_PERMISSIONS));
 
 router.get('/', ctrl.listAllCommunities);
 router.post('/:id/approve', ctrl.approveCommunity);

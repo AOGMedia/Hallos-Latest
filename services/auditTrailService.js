@@ -235,12 +235,14 @@ class AuditTrailService {
       }
 
       if (category) {
-        whereClause += ' AND category = :category';
+        // Stored in resource_type (see storeAuditEntry).
+        whereClause += ' AND resource_type = :category';
         replacements.category = category;
       }
 
       if (eventType) {
-        whereClause += ' AND event_type = :eventType';
+        // Stored in operation_type (see storeAuditEntry).
+        whereClause += ' AND operation_type = :eventType';
         replacements.eventType = eventType;
       }
 
@@ -274,6 +276,8 @@ class AuditTrailService {
 
       return (results || []).map(entry => ({
         ...entry,
+        eventType: entry.operation_type,
+        category: entry.resource_type,
         data: this.parseJSON(entry.old_values),
         metadata: this.parseJSON(entry.new_values)
       }));

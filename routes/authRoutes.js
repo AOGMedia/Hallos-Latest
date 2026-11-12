@@ -1,4 +1,5 @@
 const express = require('express');
+const { recordLogin } = require('../services/userLoginService');
 const passport = require('passport');
 const { body } = require('express-validator');
 const jwt = require('jsonwebtoken');
@@ -36,6 +37,7 @@ router.get('/google', passport.authenticate('google', { scope: ['email', 'profil
 router.get('/google/callback', 
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
+    recordLogin(req.user.id, req, 'google');
     const token = jwt.sign(
       { id: req.user.id, role: req.user.role },
       process.env.JWT_SECRET_KEY,

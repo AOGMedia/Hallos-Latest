@@ -419,7 +419,7 @@ class WithdrawalLimitService {
    * @param {string} currency - Currency code (optional)
    * @returns {Object} Withdrawal statistics
    */
-  getUserWithdrawalStats(userId, currency = null) {
+  async getUserWithdrawalStats(userId, currency = null) {
     const stats = {
       userId,
       tier: this.getUserTier(userId),
@@ -430,8 +430,8 @@ class WithdrawalLimitService {
     const currencies = currency ? [currency] : ['NGN', 'USD'];
     
     for (const curr of currencies) {
-      const limits = this.getUserLimits(userId, curr);
-      const usage = this.getCurrentUsage(userId, curr);
+      const limits = await this.getUserLimits(userId, curr);
+      const usage = await this.getCurrentUsage(userId, curr);
       
       stats.currencies[curr] = {
         limits,

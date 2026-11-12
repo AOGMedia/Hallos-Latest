@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const ugcController = require('../controllers/ugcController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 
 /**
  * UGC Agency Routes
@@ -67,14 +67,14 @@ router.get('/my-requests', authMiddleware, ugcController.getMyCollaborationReque
  * @access  Private (admin only)
  * @query   status, companyId, userId, page, limit
  */
-router.get('/admin/requests', authMiddleware, adminMiddleware, ugcController.getAllCollaborationRequests);
+router.get('/admin/requests', authMiddleware, requirePermission('agency.view'), ugcController.getAllCollaborationRequests);
 
 /**
  * @route   GET /api/ugc/admin/stats
  * @desc    Get collaboration statistics
  * @access  Private (admin only)
  */
-router.get('/admin/stats', authMiddleware, adminMiddleware, ugcController.getCollaborationStats);
+router.get('/admin/stats', authMiddleware, requirePermission('agency.view'), ugcController.getCollaborationStats);
 
 /**
  * @route   PATCH /api/ugc/admin/requests/:id
@@ -82,6 +82,6 @@ router.get('/admin/stats', authMiddleware, adminMiddleware, ugcController.getCol
  * @access  Private (admin only)
  * @body    { status: string }
  */
-router.patch('/admin/requests/:id', authMiddleware, adminMiddleware, ugcController.updateCollaborationRequestStatus);
+router.patch('/admin/requests/:id', authMiddleware, requirePermission('agency.manage'), ugcController.updateCollaborationRequestStatus);
 
 module.exports = router;

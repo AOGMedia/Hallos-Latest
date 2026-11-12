@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const blogController = require('../controllers/blogController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 
 const IMAGE_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
 
@@ -36,10 +36,10 @@ router.get('/posts', blogController.listPublished);
 router.get('/posts/:slug', blogController.getPublishedBySlug);
 
 // ── Admin ─────────────────────────────────────────────────────────────────
-router.get('/admin/posts', authMiddleware, adminMiddleware, blogController.listAll);
-router.get('/admin/posts/:id', authMiddleware, adminMiddleware, blogController.getById);
-router.post('/admin/posts', authMiddleware, adminMiddleware, upload.single('coverImage'), blogController.create);
-router.put('/admin/posts/:id', authMiddleware, adminMiddleware, upload.single('coverImage'), blogController.update);
-router.delete('/admin/posts/:id', authMiddleware, adminMiddleware, blogController.remove);
+router.get('/admin/posts', authMiddleware, requirePermission('blog.view'), blogController.listAll);
+router.get('/admin/posts/:id', authMiddleware, requirePermission('blog.view'), blogController.getById);
+router.post('/admin/posts', authMiddleware, requirePermission('blog.manage'), upload.single('coverImage'), blogController.create);
+router.put('/admin/posts/:id', authMiddleware, requirePermission('blog.manage'), upload.single('coverImage'), blogController.update);
+router.delete('/admin/posts/:id', authMiddleware, requirePermission('blog.manage'), blogController.remove);
 
 module.exports = router;

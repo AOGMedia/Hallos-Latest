@@ -262,3 +262,84 @@ exports.getUsageHistory = async (req, res) => {
     });
   }
 };
+
+/**
+ * Permanently delete a coupon
+ * DELETE /api/admin/coupons/:id/permanent
+ *
+ * Allowed when the coupon was never used, or when its end date has passed.
+ * Before anything is removed, the coupon and every use of it are copied into
+ * deleted_coupons, so sales and partner commission history can still be traced.
+ * Purchases and freebie access keep their records with the coupon link cleared.
+ * It all happens in one transaction: if any step fails, nothing changes.
+ */
+exports.adminHardDelete = async (req, res) => {
+  const { QueryTypes } = require('sequelize');
+  const sequelize = require('../config/db');
+  const select = (sql, replacements, transaction) =>
+    sequelize.query(sql, { replacements, type: QueryTypes.SELECT, transaction });
+  const run = (sql, replacements, transaction) => sequelize.query(sql, { replacements, transaction });
+
+  try {
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS deleted_coupons (
+      id UUID PRIMARY KEY,
+      code VARCHAR(100) NOT NULL,
+      coupon JSONB NOT NULL,
+      usages JSONB NOT NULL,
+      usage_count INTEGER NOT NULL,
+      deleted_by INTEGER NOT NULL,
+      deleted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    const linkedTables = (await select(
+      `SELECT table_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND column_name = 'coupon_id'
+          AND table_name IN ('purchases', 'freebie_access')`
+    )).map((row) => row.table_name);
+
+    const result = await sequelize.transaction(async (transaction) => {
+      const [coupon] = await select('SELECT * FROM coupons WHERE id = :id FOR UPDATE', { id: req.params.id }, transaction);
+      if (!coupon) return { status: 404, message: 'Coupon not found' };
+
+      const usages = await select('SELECT * FROM coupon_usage WHERE coupon_id = :id', { id: coupon.id }, transaction);
+      const hasEnded = coupon.status === 'expired' || (coupon.expires_at && new Date(coupon.expires_at) < new Date());
+      if (usages.length > 0 && !hasEnded) {
+        return {
+          status: 409,
+          message: `${coupon.code} is still running and has been used. Turn it off now, or delete it after its end date.`,
+        };
+      }
+
+      await run(
+        `INSERT INTO deleted_coupons (id, code, coupon, usages, usage_count, deleted_by)
+         VALUES (:id, :code, CAST(:coupon AS JSONB), CAST(:usages AS JSONB), :count, :deletedBy)
+         ON CONFLICT (id) DO NOTHING`,
+        {
+          id: coupon.id,
+          code: coupon.code,
+          coupon: JSON.stringify(coupon),
+          usages: JSON.stringify(usages),
+          count: usages.length,
+          deletedBy: req.user.id,
+        },
+        transaction
+      );
+      for (const table of linkedTables) {
+        await run(`UPDATE ${table} SET coupon_id = NULL WHERE coupon_id = :id`, { id: coupon.id }, transaction);
+      }
+      await run('DELETE FROM coupon_usage WHERE coupon_id = :id', { id: coupon.id }, transaction);
+      await run('DELETE FROM coupon_audit_log WHERE coupon_id = :id', { id: coupon.id }, transaction);
+      await run('DELETE FROM coupons WHERE id = :id', { id: coupon.id }, transaction);
+      return { status: 200, code: coupon.code, uses: usages.length };
+    });
+
+    if (result.status !== 200) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+    console.log(`[Admin Coupon] Coupon ${result.code} (${req.params.id}, ${result.uses} uses archived) permanently deleted by user ${req.user.id}`);
+    return res.status(200).json({ success: true, message: 'Coupon deleted', archivedUses: result.uses });
+  } catch (error) {
+    console.error('[Admin Coupon] Hard delete error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to delete coupon. Nothing was changed.' });
+  }
+};

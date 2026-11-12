@@ -8,7 +8,7 @@ const quizTournamentController = require('../controllers/quizTournamentControlle
 const quizAdminController = require('../controllers/quizAdminController');
 const quizLeaderboardController = require('../controllers/quizLeaderboardController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 const quizErrorHandler = require('../middleware/quizErrorHandler');
 const quizRateLimiter = require('../middleware/quizRateLimiter');
 const quizInputSanitizer = require('../middleware/quizInputSanitizer');
@@ -393,28 +393,28 @@ router.get('/leaderboard/tournament', authMiddleware, quizLeaderboardController.
  * @desc    Upload questions via Excel file
  * @access  Admin only
  */
-router.post('/admin/questions/upload', authMiddleware, adminMiddleware, upload.any(), quizAdminController.uploadQuestions);
+router.post('/admin/questions/upload', authMiddleware, requirePermission('quiz.manage'), upload.any(), quizAdminController.uploadQuestions);
 
 /**
  * @route   GET /api/quiz/admin/questions
  * @desc    Get questions list
  * @access  Admin only
  */
-router.get('/admin/questions', authMiddleware, adminMiddleware, quizAdminController.getQuestions);
+router.get('/admin/questions', authMiddleware, requirePermission('quiz.view'), quizAdminController.getQuestions);
 
 /**
  * @route   PUT /api/quiz/admin/question/:id
  * @desc    Update a question
  * @access  Admin only
  */
-router.put('/admin/question/:id', authMiddleware, adminMiddleware, quizAdminController.updateQuestion);
+router.put('/admin/question/:id', authMiddleware, requirePermission('quiz.manage'), quizAdminController.updateQuestion);
 
 /**
  * @route   DELETE /api/quiz/admin/question/:id
  * @desc    Delete a question
  * @access  Admin only
  */
-router.delete('/admin/question/:id', authMiddleware, adminMiddleware, quizAdminController.deleteQuestion);
+router.delete('/admin/question/:id', authMiddleware, requirePermission('quiz.manage'), quizAdminController.deleteQuestion);
 
 /**
  * @route   GET /api/quiz/categories
@@ -440,84 +440,87 @@ router.get('/categories', authMiddleware, async (req, res, next) => {
  * @desc    Create a question category
  * @access  Admin only
  */
-router.post('/admin/category', authMiddleware, adminMiddleware, quizAdminController.createCategory);
+router.post('/admin/category', authMiddleware, requirePermission('quiz.manage'), quizAdminController.createCategory);
 
 /**
  * @route   POST /api/quiz/admin/tournament/create
  * @desc    Create a tournament
  * @access  Admin only
  */
-router.post('/admin/tournament/create', authMiddleware, adminMiddleware, quizAdminController.createTournament);
+router.post('/admin/tournament/create', authMiddleware, requirePermission('quiz.manage'), quizAdminController.createTournament);
 
 /**
  * @route   PUT /api/quiz/admin/tournament/:id
  * @desc    Update a tournament
  * @access  Admin only
  */
-router.put('/admin/tournament/:id', authMiddleware, adminMiddleware, quizAdminController.updateTournament);
+router.put('/admin/tournament/:id', authMiddleware, requirePermission('quiz.manage'), quizAdminController.updateTournament);
 
 /**
  * @route   POST /api/quiz/admin/tournament/:id/cancel
  * @desc    Cancel a tournament
  * @access  Admin only
  */
-router.post('/admin/tournament/:id/cancel', authMiddleware, adminMiddleware, quizAdminController.cancelTournament);
+router.post('/admin/tournament/:id/cancel', authMiddleware, requirePermission('quiz.manage'), quizAdminController.cancelTournament);
+
+// Delete for good (refused while live, or open with paid entries)
+router.delete('/admin/tournament/:id', authMiddleware, requirePermission('quiz.manage'), quizAdminController.deleteTournament);
 
 /**
  * @route   POST /api/quiz/admin/tournament/:id/start
  * @desc    Start a tournament manually
  * @access  Admin only
  */
-router.post('/admin/tournament/:id/start', authMiddleware, adminMiddleware, quizAdminController.startTournament);
+router.post('/admin/tournament/:id/start', authMiddleware, requirePermission('quiz.manage'), quizAdminController.startTournament);
 
 /**
  * @route   GET /api/quiz/admin/tournament/proposals
  * @desc    List pending user-hosted tournament proposals
  * @access  Admin only
  */
-router.get('/admin/tournament/proposals', authMiddleware, adminMiddleware, quizAdminController.listTournamentProposals);
+router.get('/admin/tournament/proposals', authMiddleware, requirePermission('quiz.view'), quizAdminController.listTournamentProposals);
 
 /**
  * @route   POST /api/quiz/admin/tournament/:id/approve
  * @desc    Approve a user-hosted tournament proposal
  * @access  Admin only
  */
-router.post('/admin/tournament/:id/approve', authMiddleware, adminMiddleware, quizAdminController.approveTournamentProposal);
+router.post('/admin/tournament/:id/approve', authMiddleware, requirePermission('quiz.manage'), quizAdminController.approveTournamentProposal);
 
 /**
  * @route   POST /api/quiz/admin/tournament/:id/reject
  * @desc    Reject a user-hosted tournament proposal
  * @access  Admin only
  */
-router.post('/admin/tournament/:id/reject', authMiddleware, adminMiddleware, quizAdminController.rejectTournamentProposal);
+router.post('/admin/tournament/:id/reject', authMiddleware, requirePermission('quiz.manage'), quizAdminController.rejectTournamentProposal);
 
 /**
  * @route   GET /api/quiz/admin/tournament/:id/overview
  * @desc    Live monitoring view — rounds, matches, participant status breakdown
  * @access  Admin only
  */
-router.get('/admin/tournament/:id/overview', authMiddleware, adminMiddleware, quizAdminController.getTournamentOverview);
+router.get('/admin/tournament/:id/overview', authMiddleware, requirePermission('quiz.view'), quizAdminController.getTournamentOverview);
 
 /**
  * @route   POST /api/quiz/admin/tournament/:id/force-finalize
  * @desc    Manual override to finalize a stuck tournament and pay out prizes based on current standings
  * @access  Admin only
  */
-router.post('/admin/tournament/:id/force-finalize', authMiddleware, adminMiddleware, quizAdminController.forceFinalizeTournament);
+router.post('/admin/tournament/:id/force-finalize', authMiddleware, requirePermission('quiz.manage'), quizAdminController.forceFinalizeTournament);
 
 /**
  * @route   GET /api/quiz/admin/dashboard
  * @desc    Get admin dashboard statistics
  * @access  Admin only
  */
-router.get('/admin/dashboard', authMiddleware, adminMiddleware, quizAdminController.getDashboard);
+router.get('/admin/dashboard', authMiddleware, requirePermission('quiz.view'), quizAdminController.getDashboard);
 
 /**
  * @route   POST /api/quiz/admin/user/:id/adjust-balance
  * @desc    Adjust user's Chuta balance
  * @access  Admin only
  */
-router.post('/admin/user/:id/adjust-balance', authMiddleware, adminMiddleware, quizAdminController.adjustUserBalance);
+router.post('/admin/user/:id/adjust-balance', authMiddleware, requirePermission('quiz.balances'), quizAdminController.adjustUserBalance);
 
 // ==================== ACTIVE USERS ROUTE ====================
 

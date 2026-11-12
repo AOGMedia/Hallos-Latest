@@ -1,7 +1,5 @@
-const FraudDetectionService = require('../services/fraudDetectionService');
+const fraudDetectionService = require('../services/fraudDetectionInstance');
 
-// Create singleton instance
-const fraudDetectionService = new FraudDetectionService();
 
 /**
  * Fraud Detection Management Controller

@@ -1,4 +1,4 @@
-const FraudDetectionService = require('../services/fraudDetectionService');
+const fraudDetectionService = require('../services/fraudDetectionInstance');
 
 /**
  * Fraud Detection Middleware
@@ -6,8 +6,6 @@ const FraudDetectionService = require('../services/fraudDetectionService');
  * Integrates fraud detection with financial operations
  */
 
-// Create singleton instance
-const fraudDetectionService = new FraudDetectionService();
 
 /**
  * Create fraud detection middleware for financial operations

@@ -351,7 +351,7 @@ class QuestionService {
    * @returns {Promise<{questions: Array, total: number}>}
    */
   async getQuestionsByCategory(categoryId, options = {}) {
-    const { page = 1, limit = 20, difficulty } = options;
+    const { page = 1, limit = 20, difficulty, includeAnswers = false } = options;
     const offset = (page - 1) * limit;
 
     const where = { categoryId, isActive: true };
@@ -364,7 +364,8 @@ class QuestionService {
       limit,
       offset,
       order: [['createdAt', 'DESC']],
-      attributes: { exclude: ['correctAnswer'] }
+      // Only the admin question bank asks for answers, so they can review and fix them.
+      attributes: includeAnswers ? undefined : { exclude: ['correctAnswer'] }
     });
 
     return {

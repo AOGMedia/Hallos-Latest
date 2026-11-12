@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const User = require('../models/User');
 const { avatarUrlOf } = require('../utils/userAvatar');
+const { recordLogin } = require('../services/userLoginService');
 const SECRET_KEY = process.env.JWT_SECRET_KEY;
 
 exports.signup = async (req, res) => {
@@ -88,6 +89,7 @@ exports.login = async (req, res) => {
     }
 
     const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1d' });
+    recordLogin(user.id, req, 'password');
 
     // Return user object with role for frontend redirect logic
     res.json({ 

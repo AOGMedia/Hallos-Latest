@@ -1,4 +1,4 @@
-const WithdrawalLimitService = require('../services/withdrawalLimitService');
+const withdrawalLimitService = require('../services/withdrawalLimitInstance');
 
 /**
  * Withdrawal Limit Middleware
@@ -6,8 +6,6 @@ const WithdrawalLimitService = require('../services/withdrawalLimitService');
  * Integrates withdrawal limit checking with withdrawal operations
  */
 
-// Create singleton instance
-const withdrawalLimitService = new WithdrawalLimitService();
 
 /**
  * Create withdrawal limit middleware

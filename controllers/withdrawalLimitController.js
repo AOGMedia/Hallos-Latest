@@ -1,7 +1,5 @@
-const WithdrawalLimitService = require('../services/withdrawalLimitService');
+const withdrawalLimitService = require('../services/withdrawalLimitInstance');
 
-// Create singleton instance
-const withdrawalLimitService = new WithdrawalLimitService();
 
 /**
  * Withdrawal Limit Management Controller
@@ -29,7 +27,7 @@ exports.getUserWithdrawalStats = async (req, res) => {
       });
     }
     
-    const stats = withdrawalLimitService.getUserWithdrawalStats(
+    const stats = await withdrawalLimitService.getUserWithdrawalStats(
       parseInt(userId),
       currency ? currency.toUpperCase() : null
     );

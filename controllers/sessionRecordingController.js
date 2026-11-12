@@ -405,3 +405,52 @@ exports.getRecordingHistory = async (req, res) => {
     });
   }
 };
+
+/**
+ * Find live series to send recordings for, including private and finished ones.
+ * GET /api/admin/live-series/search?q=
+ */
+exports.searchSeries = async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim().slice(0, 100);
+    const where = q ? { title: { [Op.iLike]: `%${q}%` } } : {};
+    const series = await LiveSeries.findAll({
+      where,
+      attributes: ['id', 'title', 'status', 'privacy', 'startDate', 'endDate', 'thumbnailUrl', 'userId'],
+      order: [['startDate', 'DESC']],
+      limit: 15,
+      raw: true,
+    });
+
+    const ids = series.map((item) => item.id);
+    const [students, creators] = await Promise.all([
+      ids.length
+        ? Purchase.findAll({
+            where: { contentType: 'live_series', contentId: ids, paymentStatus: 'completed' },
+            attributes: ['contentId', [sequelize.fn('COUNT', sequelize.fn('DISTINCT', sequelize.col('user_id'))), 'count']],
+            group: ['contentId'],
+            raw: true,
+          })
+        : [],
+      User.findAll({
+        where: { id: [...new Set(series.map((item) => item.userId))] },
+        attributes: ['id', 'firstname', 'lastname'],
+        raw: true,
+      }),
+    ]);
+    const studentCount = new Map(students.map((row) => [String(row.contentId), Number(row.count)]));
+    const creatorName = new Map(creators.map((row) => [row.id, `${row.firstname || ''} ${row.lastname || ''}`.trim()]));
+
+    return res.status(200).json({
+      success: true,
+      series: series.map((item) => ({
+        ...item,
+        creatorName: creatorName.get(item.userId) || null,
+        enrolledStudents: studentCount.get(String(item.id)) || 0,
+      })),
+    });
+  } catch (error) {
+    console.error('[Session Recording] Series search error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to search series' });
+  }
+};

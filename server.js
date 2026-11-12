@@ -42,11 +42,14 @@ const communityRoutes = require('./routes/communityRoutes');
 const adminCommunityRoutes = require('./routes/adminCommunityRoutes');
 const campaignRoutes = require('./routes/campaignRoutes');
 const blogRoutes = require('./routes/blogRoutes');
+const staffRoutes = require('./routes/staffRoutes');
 const rateLimiter = require('./middleware/rateLimiter');
 const sequelize = require('./config/db');
 const { ensureSupportTables } = require('./utils/ensureSupportTables');
 const { ensureLiveIdempotency } = require('./utils/ensureLiveIdempotency');
 const { ensureGetStreamSupport } = require('./utils/ensureGetStreamSupport');
+const { ensureStaffAccess } = require('./utils/ensureStaffAccess');
+const { ensureUserInsights } = require('./utils/ensureUserInsights');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -87,7 +90,8 @@ const allowedOrigins = [
   'https://quiz.hallos.net',
   'https://www.quiz.hallos.net',
   'https://hallos-frontend.vercel.app',
-  'https://hallos-latest.vercel.app'
+  'https://hallos-latest.vercel.app',
+  ...(process.env.ADMIN_APP_URL ? [process.env.ADMIN_APP_URL.trim().replace(/\/+$/, '')] : [])
 ];
 
 const corsOptions = {
@@ -193,6 +197,7 @@ app.use('/api/communities', communityRoutes);
 app.use('/api/admin/communities', adminCommunityRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/blog', blogRoutes);
+app.use('/api/staff', staffRoutes);
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/uploads', express.static('uploads'));
 
@@ -223,6 +228,10 @@ sequelize.sync({ force: false })
   // Same reason: LiveClass declares getstream_call_id. Never throws — on
   // failure it disables GetStream and leaves ZegoCloud untouched.
   .then(() => ensureGetStreamSupport())
+  // Never throws: if it can't run, only staff roles are unavailable.
+  .then(() => ensureStaffAccess())
+  // Same: only the admin's email and wallet tools depend on this.
+  .then(() => ensureUserInsights())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const sessionRecordingController = require('../controllers/sessionRecordingController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 
 /**
  * Session Recording Routes
@@ -19,10 +19,21 @@ const adminMiddleware = require('../middleware/adminMiddleware');
  *   testEmail: "test@example.com"
  * }
  */
+/**
+ * Find a series by title (any status or privacy)
+ * GET /api/admin/live-series/search?q=
+ */
+router.get(
+  '/search',
+  authMiddleware,
+  requirePermission('recordings.view'),
+  sessionRecordingController.searchSeries
+);
+
 router.post(
   '/:seriesId/send-recording/test',
   authMiddleware,
-  adminMiddleware,
+  requirePermission('recordings.send'),
   sessionRecordingController.sendTestRecordingEmail
 );
 
@@ -41,7 +52,7 @@ router.post(
 router.post(
   '/:seriesId/send-recording',
   authMiddleware,
-  adminMiddleware,
+  requirePermission('recordings.send'),
   sessionRecordingController.sendRecordingToStudents
 );
 
@@ -52,7 +63,7 @@ router.post(
 router.get(
   '/:seriesId/recording-history',
   authMiddleware,
-  adminMiddleware,
+  requirePermission('recordings.view'),
   sessionRecordingController.getRecordingHistory
 );
 

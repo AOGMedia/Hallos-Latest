@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
+const { ADMIN_ROUTE_PERMISSIONS, ADMIN_DELEGATED_PATHS } = require('../config/staffRouteAccess');
 const financialRateLimiterController = require('../controllers/financialRateLimiterController');
 const fraudDetectionController = require('../controllers/fraudDetectionController');
 const withdrawalLimitController = require('../controllers/withdrawalLimitController');
@@ -9,6 +10,19 @@ const auditTrailController = require('../controllers/auditTrailController');
 const manualReviewController = require('../controllers/manualReviewController');
 const transactionHistoryController = require('../controllers/transactionHistoryController');
 const adminDashboardController = require('../controllers/adminDashboardController');
+const adminUserController = require('../controllers/adminUserController');
+const adminLiveController = require('../controllers/adminLiveController');
+const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
+
+const userActionLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests. Please wait a moment.' },
+  keyGenerator: (req) => (req.user && req.user.id ? `user:${req.user.id}` : ipKeyGenerator(req.ip || '127.0.0.1')),
+});
 
 /**
  * Admin Routes for System Management
@@ -19,8 +33,8 @@ const adminDashboardController = require('../controllers/adminDashboardControlle
 // Apply authentication middleware to all routes
 router.use(authMiddleware);
 
-// Apply admin role check middleware to all routes
-router.use(adminMiddleware);
+// Admins pass as before. Staff pass only where a rule grants it; anything else stays admin-only.
+router.use(requirePermission.byRoute(ADMIN_ROUTE_PERMISSIONS, { delegatedPaths: ADMIN_DELEGATED_PATHS }));
 
 /**
  * Financial Rate Limiter Management
@@ -197,6 +211,19 @@ router.get('/content-stats', adminDashboardController.getContentStats);
 router.get('/users', adminDashboardController.getUsers);
 router.get('/users/:id', adminDashboardController.getUserById);
 router.patch('/users/:id/role', adminDashboardController.updateUserRole);
+router.get('/users/:id/overview', adminUserController.getOverview);
+
+// Live classes and series: watch everything, force-stop what's running.
+router.get('/live/overview', adminLiveController.getOverview);
+router.get('/live/classes', adminLiveController.listClasses);
+router.get('/live/classes/:id', adminLiveController.getClass);
+router.post('/live/classes/:id/end', adminLiveController.endClass);
+router.get('/live/series', adminLiveController.listSeries);
+router.get('/live/series/:id', adminLiveController.getSeries);
+router.post('/live/sessions/:id/end', adminLiveController.endSession);
+router.get('/users/:id/activity', adminUserController.getActivity);
+router.post('/users/:id/email', userActionLimiter, adminUserController.sendEmail);
+router.post('/users/:id/wallet-adjustments', userActionLimiter, adminUserController.adjustWallet);
 
 // Payout management
 router.get('/payouts', adminDashboardController.getPayouts);

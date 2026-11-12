@@ -98,7 +98,8 @@ exports.getQuestions = async (req, res) => {
     const result = await questionService.getQuestionsByCategory(resolvedId, {
       difficulty,
       page: parseInt(page),
-      limit: parseInt(limit)
+      limit: parseInt(limit),
+      includeAnswers: true
     });
 
     return res.status(200).json({ success: true, ...result });
@@ -512,3 +513,74 @@ exports.adjustUserBalance = async (req, res) => {
 };
 
 module.exports = exports;
+
+/**
+ * Permanently delete a tournament
+ * DELETE /api/quiz/admin/tournament/:id
+ *
+ * Refused while it's live, or while it's open with players who paid to enter:
+ * cancel it first so everyone is refunded. Otherwise the tournament and its
+ * players are copied into deleted_tournaments, then its rounds, answers and
+ * entries are removed in one transaction. Chuta transactions (entry fees,
+ * prizes, refunds) are a separate ledger and are never touched.
+ */
+exports.deleteTournament = async (req, res) => {
+  const { QueryTypes } = require('sequelize');
+  const sequelize = require('../config/db');
+  const select = (sql, replacements, transaction) =>
+    sequelize.query(sql, { replacements, type: QueryTypes.SELECT, transaction });
+  const run = (sql, replacements, transaction) => sequelize.query(sql, { replacements, transaction });
+
+  try {
+    await sequelize.query(`CREATE TABLE IF NOT EXISTS deleted_tournaments (
+      id UUID PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      tournament JSONB NOT NULL,
+      participants JSONB NOT NULL,
+      deleted_by INTEGER NOT NULL,
+      deleted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    const result = await sequelize.transaction(async (transaction) => {
+      const [tournament] = await select('SELECT * FROM quiz_tournaments WHERE id = :id FOR UPDATE', { id: req.params.id }, transaction);
+      if (!tournament) return { status: 404, message: 'Tournament not found' };
+
+      const participants = await select('SELECT * FROM quiz_tournament_participants WHERE tournament_id = :id', { id: tournament.id }, transaction);
+      if (tournament.status === 'in_progress') {
+        return { status: 409, message: 'This tournament is live. Cancel it or force it to finish first.' };
+      }
+      if (tournament.status === 'open' && participants.length > 0 && Number(tournament.entry_fee) > 0) {
+        return { status: 409, message: 'Players have paid to enter. Cancel the tournament first so they are refunded, then delete it.' };
+      }
+
+      await run(
+        `INSERT INTO deleted_tournaments (id, name, tournament, participants, deleted_by)
+         VALUES (:id, :name, CAST(:tournament AS JSONB), CAST(:participants AS JSONB), :deletedBy)
+         ON CONFLICT (id) DO NOTHING`,
+        {
+          id: tournament.id,
+          name: tournament.name,
+          tournament: JSON.stringify(tournament),
+          participants: JSON.stringify(participants),
+          deletedBy: req.user.id,
+        },
+        transaction
+      );
+      await run('DELETE FROM quiz_tournament_answers WHERE tournament_id = :id', { id: tournament.id }, transaction);
+      await run('UPDATE quiz_matches SET tournament_id = NULL WHERE tournament_id = :id', { id: tournament.id }, transaction);
+      await run('DELETE FROM quiz_tournament_rounds WHERE tournament_id = :id', { id: tournament.id }, transaction);
+      await run('DELETE FROM quiz_tournament_participants WHERE tournament_id = :id', { id: tournament.id }, transaction);
+      await run('DELETE FROM quiz_tournaments WHERE id = :id', { id: tournament.id }, transaction);
+      return { status: 200, name: tournament.name, players: participants.length };
+    });
+
+    if (result.status !== 200) {
+      return res.status(result.status).json({ success: false, message: result.message });
+    }
+    console.log(`[Quiz Admin] Tournament "${result.name}" (${req.params.id}, ${result.players} players archived) deleted by user ${req.user.id}`);
+    return res.status(200).json({ success: true, message: 'Tournament deleted' });
+  } catch (error) {
+    console.error('[Quiz Admin] Delete tournament error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to delete tournament. Nothing was changed.' });
+  }
+};

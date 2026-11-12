@@ -1,4 +1,6 @@
 const User = require('../models/User');
+const { resolveAccess } = require('../services/staffAccessService');
+const { getEmailPortalPermission } = require('../config/staffRouteAccess');
 
 const PORTAL_ROLES = ['email_marketer', 'admin'];
 
@@ -21,7 +23,10 @@ module.exports = async (req, res, next) => {
       attributes: ['id', 'firstname', 'lastname', 'email', 'role']
     });
 
-    if (!user || !PORTAL_ROLES.includes(user.role)) {
+    const access = await resolveAccess(user);
+    const required = getEmailPortalPermission(req.method, req.path);
+
+    if (!user || !access.permissions.includes(required)) {
       return res.status(403).json({ success: false, message: 'Access denied. You do not have access to the email portal.' });
     }
 

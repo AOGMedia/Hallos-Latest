@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const feedbackController = require('../controllers/feedbackController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 
 /**
  * Feedback Routes
@@ -57,27 +57,27 @@ router.get('/my-feedback', authMiddleware, feedbackController.getMyFeedback);
  * @desc    Get all feedback with filters
  * @access  Private (admin only)
  */
-router.get('/admin/all', authMiddleware, adminMiddleware, feedbackController.getAllFeedback);
+router.get('/admin/all', authMiddleware, requirePermission('feedback.view'), feedbackController.getAllFeedback);
 
 /**
  * @route   GET /api/feedback/admin/stats
  * @desc    Get feedback statistics
  * @access  Private (admin only)
  */
-router.get('/admin/stats', authMiddleware, adminMiddleware, feedbackController.getFeedbackStats);
+router.get('/admin/stats', authMiddleware, requirePermission('feedback.view'), feedbackController.getFeedbackStats);
 
 /**
  * @route   PATCH /api/feedback/admin/:id
  * @desc    Update feedback status
  * @access  Private (admin only)
  */
-router.patch('/admin/:id', authMiddleware, adminMiddleware, feedbackController.updateFeedbackStatus);
+router.patch('/admin/:id', authMiddleware, requirePermission('feedback.manage'), feedbackController.updateFeedbackStatus);
 
 /**
  * @route   DELETE /api/feedback/admin/:id
  * @desc    Delete feedback
  * @access  Private (admin only)
  */
-router.delete('/admin/:id', authMiddleware, adminMiddleware, feedbackController.deleteFeedback);
+router.delete('/admin/:id', authMiddleware, requirePermission('feedback.manage'), feedbackController.deleteFeedback);
 
 module.exports = router;

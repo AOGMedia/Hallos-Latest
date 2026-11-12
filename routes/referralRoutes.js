@@ -3,7 +3,7 @@ const router = express.Router();
 const referralController = require('../controllers/referralController');
 const referralAdminController = require('../controllers/referralAdminController');
 const authMiddleware = require('../middleware/authMiddleware');
-const adminMiddleware = require('../middleware/adminMiddleware');
+const requirePermission = require('../middleware/requirePermission');
 
 // ==================== PARTNER ROUTES ====================
 
@@ -16,18 +16,18 @@ router.get('/my-stats', authMiddleware, referralController.getMyStats);
 // ==================== ADMIN ROUTES ====================
 
 // POST /api/referral/admin/codes
-router.post('/admin/codes', authMiddleware, adminMiddleware, referralAdminController.createCode);
+router.post('/admin/codes', authMiddleware, requirePermission('referrals.manage'), referralAdminController.createCode);
 
 // PUT /api/referral/admin/codes/:id
-router.put('/admin/codes/:id', authMiddleware, adminMiddleware, referralAdminController.updateCode);
+router.put('/admin/codes/:id', authMiddleware, requirePermission('referrals.manage'), referralAdminController.updateCode);
 
 // GET /api/referral/admin/codes
-router.get('/admin/codes', authMiddleware, adminMiddleware, referralAdminController.listCodes);
+router.get('/admin/codes', authMiddleware, requirePermission('referrals.view'), referralAdminController.listCodes);
 
 // GET /api/referral/admin/codes/:id/creators
-router.get('/admin/codes/:id/creators', authMiddleware, adminMiddleware, referralAdminController.getCreators);
+router.get('/admin/codes/:id/creators', authMiddleware, requirePermission('referrals.view'), referralAdminController.getCreators);
 
 // GET /api/referral/admin/commissions
-router.get('/admin/commissions', authMiddleware, adminMiddleware, referralAdminController.getCommissions);
+router.get('/admin/commissions', authMiddleware, requirePermission('referrals.view'), referralAdminController.getCommissions);
 
 module.exports = router;
