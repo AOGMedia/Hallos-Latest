@@ -3,6 +3,7 @@ const EmailCampaign = require('../models/EmailCampaign');
 const campaignService = require('./emailCampaignService');
 const { sendCampaignMail } = require('./emailCampaignMailer');
 const { renderCampaignEmail } = require('../utils/campaignEmail');
+const { isTrackingEnabled, markCampaignTracked } = require('./emailTrackingService');
 
 const TICK_MS = 10 * 1000;
 const BATCH_SIZE = 20;
@@ -93,6 +94,7 @@ const campaignIsSending = async (campaignId) => {
 };
 
 const processBatch = async (campaign, batch) => {
+  await markCampaignTracked(campaign.id);
   const suppressed = await getSuppressed(batch.map((r) => r.email));
 
   for (let i = 0; i < batch.length; i += 1) {
@@ -109,7 +111,8 @@ const processBatch = async (campaign, batch) => {
     }
 
     try {
-      const rendered = renderCampaignEmail(campaign, recipient);
+      const tracking = isTrackingEnabled() ? { campaignId: campaign.id, recipientId: recipient.id } : undefined;
+      const rendered = renderCampaignEmail(campaign, recipient, { tracking });
       const info = await sendCampaignMail({ to: recipient.email, ...rendered, recipientId: recipient.id });
       if (info.rejected && info.rejected.length) {
         throw Object.assign(new Error(`Address rejected by mail server: ${info.rejected.join(', ')}`), { code: 'EENVELOPE' });

@@ -71,6 +71,11 @@ exports.cancelCampaign = handle((req) => campaignService.cancelCampaign(req.para
 exports.retryFailed = handle((req) => campaignService.retryFailed(req.params.id));
 
 exports.listRecipients = handle((req) => campaignService.listRecipients(req.params.id, req.query));
+exports.analytics = handle(async (req) => {
+  const data = await require('../services/emailAnalyticsService').getCampaignAnalytics(req.params.id);
+  if (!data) throw Object.assign(new Error('Campaign not found'), { statusCode: 404 });
+  return data;
+});
 
 exports.exportRecipients = async (req, res) => {
   try {
@@ -100,7 +105,8 @@ exports.unsubscribeConfirm = (req, res) => {
   if (!valid) {
     return res.status(400).send(unsubscribePage('Invalid link', 'This unsubscribe link is not valid or has expired.'));
   }
-  const action = `?e=${encodeURIComponent(req.query.e)}&t=${encodeURIComponent(req.query.t)}`;
+  const recipient = req.query.r ? `&r=${encodeURIComponent(req.query.r)}` : '';
+  const action = `?e=${encodeURIComponent(req.query.e)}&t=${encodeURIComponent(req.query.t)}${recipient}`;
   return res.send(unsubscribePage(
     'Unsubscribe',
     `Stop receiving marketing emails from Hallos at <strong>${escapeHtml(email)}</strong>?`,
@@ -115,6 +121,7 @@ exports.unsubscribe = async (req, res) => {
   }
   try {
     await campaignService.addSuppression(email, 'unsubscribed');
+    await require('../services/emailTrackingService').recordUnsubscribe(req.query.r, email, req);
     return res.send(unsubscribePage('Unsubscribed', 'You have been unsubscribed and will no longer receive marketing emails from Hallos. Account and payment emails will still be sent.'));
   } catch (error) {
     console.error('[EmailPortal] Unsubscribe failed:', error.message);

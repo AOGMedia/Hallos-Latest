@@ -19,6 +19,12 @@ const sendLimiter = rateLimit({
 router.get('/unsubscribe', controller.unsubscribeConfirm);
 router.post('/unsubscribe', controller.unsubscribe);
 
+// Public: open pixel, link redirects and the mail provider's delivery webhook.
+const tracking = require('../services/emailTrackingService');
+router.get('/t/o/:token', tracking.handleOpen);
+router.get('/t/c/:token', tracking.handleClick);
+router.post('/webhooks/brevo', tracking.handleBrevoWebhook);
+
 // Everything below needs a logged-in user with the email_marketer (or admin) role
 router.use(authMiddleware);
 router.use(emailPortalMiddleware);
@@ -41,6 +47,11 @@ router.post('/campaigns/:id/send', sendLimiter, controller.sendCampaign);
 router.post('/campaigns/:id/cancel', controller.cancelCampaign);
 router.post('/campaigns/:id/retry-failed', controller.retryFailed);
 router.get('/campaigns/:id/recipients', controller.listRecipients);
+router.get('/campaigns/:id/analytics', controller.analytics);
+
+// Images uploaded from the device for use inside an email.
+const emailImage = require('../controllers/emailImageController');
+router.post('/images', sendLimiter, emailImage.receiveImage, emailImage.uploadEmailImage);
 router.get('/campaigns/:id/export', controller.exportRecipients);
 
 module.exports = router;

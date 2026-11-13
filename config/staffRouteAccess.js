@@ -14,6 +14,7 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['GET', /^\/users\/[^/]+\/?$/, 'users.view'],
   ['GET', /^\/users\/[^/]+\/(overview|activity)\/?$/, 'users.view'],
   ['POST', /^\/users\/[^/]+\/email\/?$/, 'users.email'],
+  ['POST', /^\/users\/email-images\/?$/, 'users.email'],
   ['POST', /^\/users\/[^/]+\/wallet-adjustments\/?$/, 'users.wallet'],
 
   ['GET', /^\/live\/(overview|classes|series)\/?$/, 'live.view'],

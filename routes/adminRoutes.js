@@ -223,6 +223,8 @@ router.get('/live/series/:id', adminLiveController.getSeries);
 router.post('/live/sessions/:id/end', adminLiveController.endSession);
 router.get('/users/:id/activity', adminUserController.getActivity);
 router.post('/users/:id/email', userActionLimiter, adminUserController.sendEmail);
+router.post('/users/email-images', userActionLimiter, require('../controllers/emailImageController').receiveImage,
+  require('../controllers/emailImageController').uploadEmailImage);
 router.post('/users/:id/wallet-adjustments', userActionLimiter, adminUserController.adjustWallet);
 
 // Payout management

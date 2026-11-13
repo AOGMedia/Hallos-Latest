@@ -116,9 +116,11 @@ const getPublicApiBase = () =>
   (process.env.EMAIL_UNSUBSCRIBE_BASE_URL || process.env.API_PUBLIC_URL || 'https://hallos-latest.onrender.com')
     .replace(/\/+$/, '');
 
-const buildUnsubscribeUrl = (email) => {
+/** `recipientId`, when given, lets the unsubscribe count against the campaign it came from. */
+const buildUnsubscribeUrl = (email, recipientId) => {
   const e = Buffer.from(String(email).trim().toLowerCase()).toString('base64url');
-  return `${getPublicApiBase()}/api/email-portal/unsubscribe?e=${e}&t=${signEmail(email)}`;
+  const r = recipientId ? `&r=${encodeURIComponent(recipientId)}` : '';
+  return `${getPublicApiBase()}/api/email-portal/unsubscribe?e=${e}&t=${signEmail(email)}${r}`;
 };
 
 const decodeEmailParam = (encoded) => {
@@ -175,14 +177,18 @@ ${bodyHtml}
  * Builds the full message for one recipient. Subject and body get merge tags
  * applied per recipient; the stored body is already sanitised at save time.
  */
-const renderCampaignEmail = ({ subject, preheader, bodyHtml }, recipient) => {
-  const unsubscribeUrl = buildUnsubscribeUrl(recipient.email);
+/**
+ * `tracking` ({ campaignId, recipientId }) adds open and click tracking; only
+ * real campaign sends pass it, so tests and personal emails are untouched.
+ */
+const renderCampaignEmail = ({ subject, preheader, bodyHtml }, recipient, { tracking } = {}) => {
+  const unsubscribeUrl = buildUnsubscribeUrl(recipient.email, tracking?.recipientId);
   const vars = buildMergeVars(recipient, unsubscribeUrl);
 
   const renderedSubject = applyMergeTags(subject, vars, { escape: false }).replace(/[\r\n]+/g, ' ').trim();
   const renderedBody = applyMergeTags(bodyHtml, vars, { escape: true });
   const html = renderShell({
-    bodyHtml: renderedBody,
+    bodyHtml: tracking ? require('../services/emailTrackingService').addTracking(renderedBody, tracking) : renderedBody,
     preheader: preheader ? applyMergeTags(preheader, vars, { escape: false }) : '',
     unsubscribeUrl
   });
