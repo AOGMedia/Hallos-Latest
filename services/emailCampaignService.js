@@ -74,7 +74,8 @@ const mapCampaign = (row) => ({
   scheduledFor: row.scheduled_for ?? row.scheduledFor ?? null,
   startedAt: row.started_at ?? row.startedAt ?? null,
   completedAt: row.completed_at ?? row.completedAt ?? null,
-  totalRecipients: row.total_recipients ?? row.totalRecipients ?? 0,
+  // The people actually queued; the stored figure was only a snapshot at send time.
+  totalRecipients: row.recipient_count > 0 ? row.recipient_count : (row.total_recipients ?? row.totalRecipients ?? 0),
   createdBy: row.created_by ?? row.createdBy ?? null,
   createdByName: row.created_by_name ?? null,
   createdAt: row.created_at ?? row.createdAt,
@@ -88,6 +89,7 @@ const mapCampaign = (row) => ({
 });
 
 const COUNT_COLUMNS = `
+  COALESCE(r.recipient_count, 0)::int AS recipient_count,
   COALESCE(r.pending_count, 0)::int AS pending_count,
   COALESCE(r.sent_count, 0)::int AS sent_count,
   COALESCE(r.failed_count, 0)::int AS failed_count,
@@ -95,7 +97,8 @@ const COUNT_COLUMNS = `
 
 const COUNT_JOIN = `
   LEFT JOIN LATERAL (
-    SELECT COUNT(*) FILTER (WHERE status IN ('pending', 'sending')) AS pending_count,
+    SELECT COUNT(*) AS recipient_count,
+           COUNT(*) FILTER (WHERE status IN ('pending', 'sending')) AS pending_count,
            COUNT(*) FILTER (WHERE status = 'sent') AS sent_count,
            COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
            COUNT(*) FILTER (WHERE status = 'skipped') AS skipped_count
@@ -141,7 +144,28 @@ const getCampaign = async (id) => {
     { id }
   );
   if (!row) throw httpError(404, 'Campaign not found');
-  return mapCampaign(row);
+  const [withExtras] = await withListExtras([mapCampaign(row)]);
+  return withExtras;
+};
+
+/**
+ * Adds opens/clicks for sent campaigns, and for drafts how many people the
+ * audience reaches right now, so the count is real before sending.
+ */
+const withListExtras = async (campaigns) => {
+  const { getEngagementFor } = require('./emailAnalyticsService');
+  const sentIds = campaigns.filter((c) => c.status !== 'draft').map((c) => c.id);
+  const engagement = await getEngagementFor(sentIds).catch(() => new Map());
+  return Promise.all(campaigns.map(async (campaign) => {
+    let audienceSize = null;
+    if (campaign.status === 'draft') {
+      audienceSize = await audienceService
+        .listAudience(campaign.audience, { page: 1, limit: 1 })
+        .then((result) => result.total)
+        .catch(() => null);
+    }
+    return { ...campaign, audienceSize, engagement: engagement.get(campaign.id) ?? null };
+  }));
 };
 
 const listCampaigns = async ({ page = 1, limit = 20, status, search } = {}) => {
@@ -170,12 +194,9 @@ const listCampaigns = async ({ page = 1, limit = 20, status, search } = {}) => {
     replacements
   );
 
+  const campaigns = await withListExtras(rows.map(mapCampaign));
   return {
-    campaigns: rows.map((row) => {
-      const mapped = mapCampaign(row);
-      delete mapped.bodyHtml;
-      return mapped;
-    }),
+    campaigns: campaigns.map(({ bodyHtml, ...campaign }) => campaign),
     total,
     page: safePage,
     limit: safeLimit,
@@ -183,8 +204,11 @@ const listCampaigns = async ({ page = 1, limit = 20, status, search } = {}) => {
   };
 };
 
-const listRecipients = async (campaignId, { status, search, page = 1, limit = 50 } = {}) => {
+const listRecipients = async (campaignId, { status, search, engagement, page = 1, limit = 50 } = {}) => {
   await findCampaignOrThrow(campaignId);
+  const { isEmailTrackingReady } = require('../utils/ensureEmailTracking');
+  const { RECIPIENT_ENGAGEMENT_JOIN, ENGAGEMENT_FILTERS } = require('./emailAnalyticsService');
+  const tracked = isEmailTrackingReady();
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
   const clauses = ['campaign_id = :campaignId'];
@@ -200,12 +224,21 @@ const listRecipients = async (campaignId, { status, search, page = 1, limit = 50
     replacements.search = `%${term.replace(/[%_\\]/g, '\\$&')}%`;
   }
 
+  if (tracked && ENGAGEMENT_FILTERS[engagement]) clauses.push(ENGAGEMENT_FILTERS[engagement]);
+
   const whereSql = clauses.join(' AND ');
-  const [{ total }] = await select(`SELECT COUNT(*)::int AS total FROM email_campaign_recipients WHERE ${whereSql}`, replacements);
+  const join = tracked ? RECIPIENT_ENGAGEMENT_JOIN : '';
+  const engagementColumns = tracked
+    ? `, COALESCE(eng.opens, 0) AS opens, COALESCE(eng.clicks, 0) AS clicks, eng.first_opened_at AS "firstOpenedAt",
+         eng.last_activity_at AS "lastActivityAt", COALESCE(eng.delivered, FALSE) AS delivered,
+         COALESCE(eng.bounced, FALSE) AS bounced, COALESCE(eng.complained, FALSE) AS complained,
+         COALESCE(eng.unsubscribed, FALSE) AS unsubscribed`
+    : '';
+  const [{ total }] = await select(`SELECT COUNT(*)::int AS total FROM email_campaign_recipients ${join} WHERE ${whereSql}`, replacements);
   const rows = await select(
     `SELECT id, user_id AS "userId", email, first_name AS "firstName", last_name AS "lastName", status,
-            attempts, error, sent_at AS "sentAt", updated_at AS "updatedAt"
-     FROM email_campaign_recipients WHERE ${whereSql}
+            attempts, error, sent_at AS "sentAt", updated_at AS "updatedAt"${engagementColumns}
+     FROM email_campaign_recipients ${join} WHERE ${whereSql}
      ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'sending' THEN 1 WHEN 'pending' THEN 2 WHEN 'sent' THEN 3 ELSE 4 END,
               sent_at DESC NULLS LAST, email
      LIMIT :limit OFFSET :offset`,
@@ -344,14 +377,26 @@ const csvCell = (value) => {
 
 const exportRecipientsCsv = async (id) => {
   const campaign = await findCampaignOrThrow(id);
+  const { isEmailTrackingReady } = require('../utils/ensureEmailTracking');
+  const { RECIPIENT_ENGAGEMENT_JOIN } = require('./emailAnalyticsService');
+  const tracked = isEmailTrackingReady();
+  const extraColumns = tracked
+    ? ', COALESCE(eng.opens, 0) AS opens, COALESCE(eng.clicks, 0) AS clicks, eng.first_opened_at, eng.bounced, eng.complained, eng.unsubscribed'
+    : '';
   const rows = await select(
-    `SELECT email, first_name, last_name, status, attempts, error, sent_at
-     FROM email_campaign_recipients WHERE campaign_id = :id ORDER BY email`,
+    `SELECT email, first_name, last_name, status, attempts, error, sent_at${extraColumns}
+     FROM email_campaign_recipients ${tracked ? RECIPIENT_ENGAGEMENT_JOIN : ''} WHERE campaign_id = :id ORDER BY email`,
     { id }
   );
-  const lines = ['email,first_name,last_name,status,attempts,error,sent_at'];
+  const iso = (value) => value && new Date(value).toISOString();
+  const yesNo = (value) => (value ? 'yes' : 'no');
+  const lines = [tracked
+    ? 'email,first_name,last_name,status,attempts,error,sent_at,opens,clicks,first_opened_at,bounced,spam_complaint,unsubscribed'
+    : 'email,first_name,last_name,status,attempts,error,sent_at'];
   for (const r of rows) {
-    lines.push([r.email, r.first_name, r.last_name, r.status, r.attempts, r.error, r.sent_at && new Date(r.sent_at).toISOString()].map(csvCell).join(','));
+    const cells = [r.email, r.first_name, r.last_name, r.status, r.attempts, r.error, iso(r.sent_at)];
+    if (tracked) cells.push(r.opens, r.clicks, iso(r.first_opened_at), yesNo(r.bounced), yesNo(r.complained), yesNo(r.unsubscribed));
+    lines.push(cells.map(csvCell).join(','));
   }
   return { filename: `${campaign.name.replace(/[^\w-]+/g, '_').slice(0, 60) || 'campaign'}-recipients.csv`, csv: lines.join('\n') };
 };

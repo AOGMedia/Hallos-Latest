@@ -111,7 +111,12 @@ const buildWhere = (rawAudience, now = new Date()) => {
     }
 
     if (filters.liveClassIds.length) {
-      where.push('EXISTS (SELECT 1 FROM live_attendees a WHERE a.user_id = u.id AND a.live_class_id IN (:liveClassIds))');
+      // Free sign-ups have an attendee row; paid ones only a completed purchase.
+      where.push(`(
+        EXISTS (SELECT 1 FROM live_attendees a WHERE a.user_id = u.id AND a.live_class_id IN (:liveClassIds))
+        OR EXISTS (SELECT 1 FROM purchases p3 WHERE p3.user_id = u.id AND p3.content_type = 'live_class'
+                   AND p3.payment_status = 'completed' AND p3.content_id IN (:liveClassIds))
+      )`);
       replacements.liveClassIds = filters.liveClassIds;
     }
 
@@ -130,7 +135,8 @@ const buildWhere = (rawAudience, now = new Date()) => {
     }
 
     if (filters.joinedLiveClass) {
-      const exists = 'EXISTS (SELECT 1 FROM live_attendees a2 WHERE a2.user_id = u.id)';
+      const exists = `(EXISTS (SELECT 1 FROM live_attendees a2 WHERE a2.user_id = u.id)
+        OR EXISTS (SELECT 1 FROM purchases p4 WHERE p4.user_id = u.id AND p4.content_type = 'live_class' AND p4.payment_status = 'completed'))`;
       where.push(filters.joinedLiveClass === 'yes' ? exists : `NOT ${exists}`);
     }
   }
@@ -210,7 +216,11 @@ const getAudienceOptions = async () => {
   const [liveClasses, liveSeries, [totals]] = await Promise.all([
     query(
       `SELECT c.id, c.title, c.start_time AS "startTime",
-              (SELECT COUNT(DISTINCT a.user_id) FROM live_attendees a WHERE a.live_class_id = c.id)::int AS attendees
+              (SELECT COUNT(*) FROM (
+                 SELECT user_id FROM live_attendees WHERE live_class_id = c.id
+                 UNION
+                 SELECT user_id FROM purchases WHERE content_type = 'live_class' AND content_id = c.id AND payment_status = 'completed'
+               ) joined)::int AS attendees
        FROM live_classes c ORDER BY c.start_time DESC NULLS LAST LIMIT 200`
     ),
     query(
@@ -222,10 +232,30 @@ const getAudienceOptions = async () => {
                ) enrolled)::int AS enrolled
        FROM live_series s ORDER BY s.start_date DESC NULLS LAST LIMIT 100`
     ),
+    // Why "everyone" is smaller than the total user count. Each user lands in exactly
+    // one bucket, in the order the audience rules exclude them, so the parts add up.
     query(
-      `SELECT COUNT(*)::int AS "allUsers",
-              (SELECT COUNT(*) FROM email_suppressions)::int AS unsubscribed
-       FROM "Users"`
+      `WITH classified AS (
+         SELECT u.id, lower(u.email) AS email,
+                CASE
+                  WHEN u.email IS NULL OR u.email !~ :emailPattern THEN 'noEmail'
+                  WHEN u.role = 'email_marketer' THEN 'staff'
+                  WHEN u.role = 'admin' THEN 'admins'
+                  WHEN EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = lower(u.email)) THEN 'unsubscribed'
+                  ELSE 'eligible'
+                END AS bucket
+           FROM "Users" u
+       )
+       SELECT COUNT(*)::int AS "allUsers",
+              (SELECT COUNT(*) FROM email_suppressions)::int AS unsubscribed,
+              COUNT(*) FILTER (WHERE bucket = 'noEmail')::int AS "noValidEmail",
+              COUNT(*) FILTER (WHERE bucket = 'staff')::int AS "emailStaff",
+              COUNT(*) FILTER (WHERE bucket = 'admins')::int AS admins,
+              COUNT(*) FILTER (WHERE bucket = 'unsubscribed')::int AS "unsubscribedUsers",
+              (COUNT(*) FILTER (WHERE bucket = 'eligible') - COUNT(DISTINCT email) FILTER (WHERE bucket = 'eligible'))::int AS "duplicateEmails",
+              COUNT(DISTINCT email) FILTER (WHERE bucket = 'eligible')::int AS reachable
+         FROM classified`,
+      { emailPattern: EMAIL_PATTERN }
     )
   ]);
 

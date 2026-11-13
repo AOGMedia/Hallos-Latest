@@ -50,6 +50,7 @@ const { ensureLiveIdempotency } = require('./utils/ensureLiveIdempotency');
 const { ensureGetStreamSupport } = require('./utils/ensureGetStreamSupport');
 const { ensureStaffAccess } = require('./utils/ensureStaffAccess');
 const { ensureUserInsights } = require('./utils/ensureUserInsights');
+const { ensureEmailTracking } = require('./utils/ensureEmailTracking');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -232,6 +233,8 @@ sequelize.sync({ force: false })
   .then(() => ensureStaffAccess())
   // Same: only the admin's email and wallet tools depend on this.
   .then(() => ensureUserInsights())
+  // Same: only campaign open/click tracking depends on this.
+  .then(() => ensureEmailTracking())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
