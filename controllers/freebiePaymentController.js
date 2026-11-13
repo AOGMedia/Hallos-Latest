@@ -17,6 +17,11 @@ exports.initiatePurchase = async (req, res) => {
     const userId = req.user.id;
     const { currency, couponCode } = req.body;
 
+    // Taken down by staff: can't be bought.
+    if (require('../services/contentModerationService').isFreebieHidden(freebieId)) {
+      return res.status(404).json({ success: false, message: 'Freebie not found' });
+    }
+
     if (!currency) {
       return res.status(400).json({
         success: false,

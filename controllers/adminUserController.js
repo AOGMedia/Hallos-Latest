@@ -1,5 +1,6 @@
 const insights = require('../services/userInsightsService');
 const actions = require('../services/adminUserActionsService');
+const suspensions = require('../services/suspensionService');
 
 const handle = (action) => async (req, res) => {
   try {
@@ -9,7 +10,7 @@ const handle = (action) => async (req, res) => {
     }
     return res.status(200).json({ success: true, data });
   } catch (error) {
-    if (error instanceof actions.UserActionError) {
+    if (error instanceof actions.UserActionError || error instanceof suspensions.SuspensionError) {
       return res.status(error.status).json({ success: false, message: error.message });
     }
     console.error('[Admin User] Request failed:', error);
@@ -40,4 +41,17 @@ exports.adjustWallet = handle((req) =>
     reason: req.body.reason,
     idempotencyKey: req.body.idempotencyKey,
   })
+);
+
+exports.getSuspensions = handle(async (req) => ({
+  current: await suspensions.getOpen(req.params.id),
+  history: await suspensions.history(req.params.id),
+}));
+
+exports.suspend = handle((req) =>
+  suspensions.suspend({ userId: req.params.id, actor: req.user, reason: req.body.reason, endsAt: req.body.endsAt })
+);
+
+exports.unsuspend = handle((req) =>
+  suspensions.lift({ userId: req.params.id, actor: req.user, reason: req.body.reason })
 );

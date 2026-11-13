@@ -152,6 +152,8 @@ exports.login = async (req, res) => {
       });
     }
 
+    const suspension = require('../services/suspensionService');
+    if (suspension.isSuspended(user.id)) return res.status(403).json(suspension.suspendedResponse(user.id));
     const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1d' });
     recordLogin(user.id, req, 'password');
 

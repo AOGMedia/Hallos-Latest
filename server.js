@@ -51,6 +51,9 @@ const { ensureGetStreamSupport } = require('./utils/ensureGetStreamSupport');
 const { ensureStaffAccess } = require('./utils/ensureStaffAccess');
 const { ensureUserInsights } = require('./utils/ensureUserInsights');
 const { ensureEmailTracking } = require('./utils/ensureEmailTracking');
+const { ensureAdminFoundations } = require('./utils/ensureAdminFoundations');
+const { ensureRefunds } = require('./utils/ensureRefunds');
+const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
 const websocketManager = require('./services/websocketManager');
@@ -158,6 +161,8 @@ app.use(
 app.use(cookieParser());
 
 app.use(express.json({ limit: '10mb' }));
+// Logs successful staff changes after the response is sent (see middleware).
+app.use(staffActionLogger);
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 
@@ -199,6 +204,7 @@ app.use('/api/admin/communities', adminCommunityRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/staff', staffRoutes);
+app.use('/api/reports', require('./routes/reportRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/uploads', express.static('uploads'));
 
@@ -235,6 +241,10 @@ sequelize.sync({ force: false })
   .then(() => ensureUserInsights())
   // Same: only campaign open/click tracking depends on this.
   .then(() => ensureEmailTracking())
+  // Same: only the staff action log and suspensions depend on this.
+  .then(() => ensureAdminFoundations())
+  // Same: only staff refunds depend on this.
+  .then(() => ensureRefunds())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

@@ -48,6 +48,9 @@ router.get('/google', passport.authenticate('google', { scope: ['email', 'profil
 router.get('/google/callback', 
   passport.authenticate('google', { failureRedirect: '/' }),
   (req, res) => {
+    if (require('../services/suspensionService').isSuspended(req.user.id)) {
+      return res.redirect('https://www.hallos.net/signin?error=account_suspended');
+    }
     recordLogin(req.user.id, req, 'google');
     const token = jwt.sign(
       { id: req.user.id, role: req.user.role },

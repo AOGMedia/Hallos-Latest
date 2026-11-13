@@ -1688,3 +1688,68 @@ exports.sendQuizFriendJoinedEmail = async (to, inviterFirstName, friendName, cta
   });
 };
 
+/**
+ * Refund emails. Titles come from creators, so they're escaped.
+ */
+const escapeHtml = (value) =>
+  String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const formatMoney = (amount, currency) => {
+  const value = Number(amount) || 0;
+  return currency === 'USD'
+    ? `$${value.toFixed(2)}`
+    : `₦${value.toLocaleString('en-NG', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+};
+
+/** To the buyer: the refund is on its way, back to how they paid. */
+exports.sendRefundIssuedEmail = async (to, firstname, contentTitle, amount, currency) => {
+  const title = escapeHtml(contentTitle || 'your purchase');
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>Your refund is on its way</h2>
+      <p>Dear ${escapeHtml(firstname || 'there')},</p>
+      <p>We’ve refunded your payment for:</p>
+      <p style="font-size: 18px; font-weight: bold; color: #333;">${title}</p>
+      <p><strong>Amount refunded:</strong> ${formatMoney(amount, currency)}</p>
+      <p>
+        The money goes back to the card or account you paid with. Banks usually take
+        5 to 10 working days to show it. Your access to this item has ended.
+      </p>
+      <p>If you have questions, reply to this email or contact support@hallos.net.</p>
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `Refund issued - ${String(contentTitle || 'your purchase').slice(0, 120)}`,
+    html,
+  });
+};
+
+/** To the creator: a sale was refunded and what came back out of their earnings. */
+exports.sendSaleRefundedEmail = async (to, creatorName, contentTitle, amountTaken, currency) => {
+  const title = escapeHtml(contentTitle || 'one of your items');
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>A sale was refunded</h2>
+      <p>Dear ${escapeHtml(creatorName || 'there')},</p>
+      <p>The hallos team refunded a buyer of:</p>
+      <p style="font-size: 18px; font-weight: bold; color: #333;">${title}</p>
+      <p>
+        <strong>Taken back from your earnings:</strong> ${formatMoney(amountTaken, currency)}.
+        You’ll see it in your wallet history as a refund.
+      </p>
+      <p>If you have questions, contact support@hallos.net.</p>
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `A sale was refunded - ${String(contentTitle || 'your item').slice(0, 120)}`,
+    html,
+  });
+};

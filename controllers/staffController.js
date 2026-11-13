@@ -47,3 +47,6 @@ exports.resendInvite = handle((req) => service.resendInvite(req.params.userId));
 exports.setPassword = handle((req) =>
   service.setPasswordFromInvite(req.body.token, req.body.password)
 );
+
+/** Everything staff changed, newest first. Super admins only. */
+exports.activity = handle((req) => require('../services/staffActivityService').listActivity(req.query));
