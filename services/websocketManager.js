@@ -90,6 +90,9 @@ class WebSocketManager {
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
+        if (require('./suspensionService').isSuspended(decoded.id || decoded.userId)) {
+          return next(new Error('Account suspended'));
+        }
         socket.userId = Number(decoded.id || decoded.userId);
         socket.user = decoded;
 

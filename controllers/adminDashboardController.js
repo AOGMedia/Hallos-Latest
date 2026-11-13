@@ -186,13 +186,20 @@ exports.getUsers = async (req, res) => {
       limit: Math.min(parseInt(limit), 100),
       offset,
     });
-    const lastLogins = await lastLoginsFor(rows.map((row) => row.id));
+    const [lastLogins, openSuspensions] = await Promise.all([
+      lastLoginsFor(rows.map((row) => row.id)),
+      require('../services/suspensionService').openFor(rows.map((row) => row.id)),
+    ]);
 
     return res.status(200).json({
       success: true,
       users: rows.map((row) => {
         const { socialLinks, ...user } = withAvatar(row.get({ plain: true }));
-        return { ...user, lastLoginAt: lastLogins.get(row.id) ?? null };
+        return {
+          ...user,
+          lastLoginAt: lastLogins.get(row.id) ?? null,
+          suspendedUntil: openSuspensions.has(row.id) ? (openSuspensions.get(row.id).endsAt ?? 'indefinitely') : null,
+        };
       }),
       pagination: {
         total: count,

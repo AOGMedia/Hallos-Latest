@@ -215,6 +215,26 @@ router.get('/users/:id/overview', adminUserController.getOverview);
 
 // Live classes and series: watch everything, force-stop what's running.
 router.get('/live/overview', adminLiveController.getOverview);
+
+// Content moderation and user reports.
+const adminContentController = require('../controllers/adminContentController');
+router.get('/content/videos', adminContentController.listVideos);
+router.get('/content/freebies', adminContentController.listFreebies);
+router.get('/content/courses', adminContentController.listCourses);
+router.patch('/content/courses/:id', adminContentController.setCourseActive);
+router.post('/content/:type/:id/takedown', adminContentController.takeDown);
+router.post('/content/:type/:id/restore', adminContentController.restore);
+router.get('/reports', adminContentController.listReports);
+router.get('/reports/count', adminContentController.reportCount);
+router.post('/reports/resolve', adminContentController.resolveReports);
+
+// Payments and refunds (back through the gateway that took the money).
+const adminPaymentController = require('../controllers/adminPaymentController');
+router.get('/payments', adminPaymentController.listPayments);
+router.get('/payments/refunds', adminPaymentController.listRefunds);
+router.post('/payments/refunds/:id/check', adminPaymentController.recheck);
+router.get('/payments/:source/:id/refund-preview', adminPaymentController.preview);
+router.post('/payments/:source/:id/refund', adminPaymentController.refund);
 router.get('/live/classes', adminLiveController.listClasses);
 router.get('/live/classes/:id', adminLiveController.getClass);
 router.post('/live/classes/:id/end', adminLiveController.endClass);
@@ -222,6 +242,9 @@ router.get('/live/series', adminLiveController.listSeries);
 router.get('/live/series/:id', adminLiveController.getSeries);
 router.post('/live/sessions/:id/end', adminLiveController.endSession);
 router.get('/users/:id/activity', adminUserController.getActivity);
+router.get('/users/:id/suspensions', adminUserController.getSuspensions);
+router.post('/users/:id/suspend', userActionLimiter, adminUserController.suspend);
+router.post('/users/:id/unsuspend', userActionLimiter, adminUserController.unsuspend);
 router.post('/users/:id/email', userActionLimiter, adminUserController.sendEmail);
 router.post('/users/email-images', userActionLimiter, require('../controllers/emailImageController').receiveImage,
   require('../controllers/emailImageController').uploadEmailImage);

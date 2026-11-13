@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { isSuspended, suspendedResponse } = require('../services/suspensionService');
 const SECRET_KEY = process.env.JWT_SECRET_KEY;
 
 module.exports = (req, res, next) => {
@@ -15,6 +16,8 @@ module.exports = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, SECRET_KEY);
+    // In-memory lookup; see services/suspensionService.
+    if (isSuspended(decoded.id)) return res.status(403).json(suspendedResponse(decoded.id));
     req.user = decoded;
     next();
   } catch (error) {

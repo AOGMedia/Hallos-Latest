@@ -26,6 +26,7 @@ router.get('/me', controller.me);
 router.use(requireSuperAdmin);
 
 router.get('/permissions', controller.permissions);
+router.get('/activity', controller.activity);
 
 router.get('/roles', controller.listRoles);
 router.post('/roles', controller.createRole);

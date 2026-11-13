@@ -200,7 +200,10 @@ exports.listFreebies = async (req, res) => {
     const limit = 12;
     const offset = (page - 1) * limit;
 
+    // Leaves out freebies staff have taken down (empty list = no filter).
+    const hiddenIds = require('../services/contentModerationService').hiddenFreebieIds();
     const { count, rows } = await Freebie.findAndCountAll({
+      where: hiddenIds.length ? { id: { [require('sequelize').Op.notIn]: hiddenIds } } : undefined,
       include: [
         { model: User, as: 'creator', attributes: ['id', 'firstname', 'lastname'] }
       ],
@@ -258,6 +261,10 @@ exports.getFreebieById = async (req, res) => {
     });
 
     if (!freebie) return res.status(404).json({ success: false, message: 'Freebie not found' });
+    // Taken down by staff: hidden from everyone but its creator.
+    if (require('../services/contentModerationService').isFreebieHidden(freebie.id) && req.user?.id !== freebie.userId) {
+      return res.status(404).json({ success: false, message: 'Freebie not found' });
+    }
 
     // Check if the authenticated user has already purchased this freebie
     let purchased = false;
@@ -308,6 +315,9 @@ exports.downloadItem = async (req, res) => {
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
 
     const freebie = item.freebie;
+    if (require('../services/contentModerationService').isFreebieHidden(freebie.id) && freebie.userId !== userId) {
+      return res.status(404).json({ success: false, message: 'Item not found' });
+    }
     const isPaidFreebie = parseFloat(freebie.price) > 0;
 
     // ── Download Gate ────────────────────────────────────────────────────────

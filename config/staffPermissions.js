@@ -19,6 +19,23 @@ const PERMISSION_GROUPS = [
       { code: 'users.view', label: 'See users and their details' },
       { code: 'users.email', label: 'Send a user a personal email', risky: true },
       { code: 'users.wallet', label: 'Credit or debit a user’s wallet', risky: true },
+      { code: 'users.suspend', label: 'Suspend or reinstate a user', risky: true },
+    ],
+  },
+  {
+    key: 'content',
+    label: 'Content',
+    permissions: [
+      { code: 'content.view', label: 'See videos, freebies and courses' },
+      { code: 'content.manage', label: 'Take content down or restore it, switch courses on or off', risky: true },
+    ],
+  },
+  {
+    key: 'reports',
+    label: 'Reports',
+    permissions: [
+      { code: 'reports.view', label: 'See what users reported' },
+      { code: 'reports.manage', label: 'Resolve or dismiss reports' },
     ],
   },
   {
@@ -65,6 +82,14 @@ const PERMISSION_GROUPS = [
     key: 'transactions',
     label: 'Transactions',
     permissions: [{ code: 'transactions.view', label: 'Search and export transactions' }],
+  },
+  {
+    key: 'payments',
+    label: 'Payments and refunds',
+    permissions: [
+      { code: 'payments.view', label: 'See what buyers paid and past refunds' },
+      { code: 'payments.refund', label: 'Refund a buyer through Paystack or Stripe', risky: true },
+    ],
   },
   {
     key: 'coupons',
