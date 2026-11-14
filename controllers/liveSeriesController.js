@@ -237,16 +237,13 @@ exports.createSeries = async (req, res) => {
  */
 exports.getAllSeries = async (req, res) => {
   try {
-    const { status, privacy, category } = req.query;
-    
+    const { status, category } = req.query;
+
     const where = {};
-    
-    // Filter by privacy (default to public for unauthenticated users)
-    if (privacy) {
-      where.privacy = privacy;
-    } else {
-      where.privacy = 'public';
-    }
+
+    // This list is public: it only ever shows public series. It used to honour
+    // ?privacy=private, which let anyone list private series; no app asks for that.
+    where.privacy = 'public';
     
     // Filter by status (default to active)
     if (status) {
@@ -267,8 +264,8 @@ exports.getAllSeries = async (req, res) => {
         {
           model: User,
           as: 'creator',
-          // socialLinks only to read the profile picture (see creatorWithAvatar).
-          attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks']
+          // socialLinks only to read the profile picture (see creatorWithAvatar). Public list: no email.
+          attributes: ['id', 'firstname', 'lastname', 'socialLinks']
         }
       ]
     });
