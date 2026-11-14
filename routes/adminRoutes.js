@@ -240,6 +240,8 @@ router.get('/payments/gateways', requireSuperAdmin, adminPaymentController.gatew
 router.put('/payments/gateways/:gateway', requireSuperAdmin, adminPaymentController.setGatewayMode);
 router.post('/payments/test-accounts', requireSuperAdmin, adminPaymentController.addTestAccount);
 router.delete('/payments/test-accounts/:userId', requireSuperAdmin, adminPaymentController.removeTestAccount);
+router.get('/payments/stuck', requireSuperAdmin, adminPaymentController.listStuckPayments);
+router.post('/payments/stuck/settle', requireSuperAdmin, adminPaymentController.settleStuckPayment);
 router.post('/payments/refunds/:id/check', adminPaymentController.recheck);
 router.get('/payments/:source/:id/refund-preview', adminPaymentController.preview);
 router.post('/payments/:source/:id/refund', adminPaymentController.refund);

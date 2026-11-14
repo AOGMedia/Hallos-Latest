@@ -60,4 +60,20 @@ exports.setGatewayMode = handleGateway((req) =>
 );
 exports.addTestAccount = handleGateway((req) => gatewayMode.addTestAccount({ userId: req.body.userId, actor: req.user }));
 exports.removeTestAccount = handleGateway((req) => gatewayMode.removeTestAccount({ userId: req.params.userId }));
+
+// Payments that reached a gateway but never got recorded (super admin only).
+const stuck = require('../services/stuckPaymentsService');
+const handleStuck = (action) => async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await action(req) });
+  } catch (error) {
+    if (error instanceof stuck.StuckPaymentError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    console.error('[Admin Payments] Stuck payments request failed:', error);
+    return res.status(500).json({ success: false, message: 'Something went wrong. Please try again.' });
+  }
+};
+exports.listStuckPayments = handleStuck((req) => stuck.listStuck({ days: req.query.days, refresh: req.query.refresh === '1' }));
+exports.settleStuckPayment = handleStuck((req) => stuck.settle({ gateway: req.body.gateway, reference: req.body.reference, actor: req.user }));
 exports.creditMissedEarnings = handleMissed((req) => missed.creditMissed({ purchaseIds: req.body.purchaseIds, actor: req.user }));
