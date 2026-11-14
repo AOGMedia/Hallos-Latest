@@ -232,6 +232,14 @@ router.post('/reports/resolve', adminContentController.resolveReports);
 const adminPaymentController = require('../controllers/adminPaymentController');
 router.get('/payments', adminPaymentController.listPayments);
 router.get('/payments/refunds', adminPaymentController.listRefunds);
+// Super admin only: no staff permission maps to these, and the role is re-checked in the database.
+const requireSuperAdmin = require('../middleware/requireSuperAdmin');
+router.get('/payments/missed-earnings', requireSuperAdmin, adminPaymentController.listMissedEarnings);
+router.post('/payments/missed-earnings/credit', requireSuperAdmin, adminPaymentController.creditMissedEarnings);
+router.get('/payments/gateways', requireSuperAdmin, adminPaymentController.gatewaySettings);
+router.put('/payments/gateways/:gateway', requireSuperAdmin, adminPaymentController.setGatewayMode);
+router.post('/payments/test-accounts', requireSuperAdmin, adminPaymentController.addTestAccount);
+router.delete('/payments/test-accounts/:userId', requireSuperAdmin, adminPaymentController.removeTestAccount);
 router.post('/payments/refunds/:id/check', adminPaymentController.recheck);
 router.get('/payments/:source/:id/refund-preview', adminPaymentController.preview);
 router.post('/payments/:source/:id/refund', adminPaymentController.refund);

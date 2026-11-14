@@ -3,6 +3,7 @@ const { paystackClient } = require('../config/paystack');
 const MultiCurrencyWalletService = require('../services/multiCurrencyWalletService');
 const sequelize = require('../config/db');
 const { Op } = require('sequelize');
+const gatewayMode = require('../services/gatewayModeService');
 
 const walletService = new MultiCurrencyWalletService();
 
@@ -176,6 +177,25 @@ exports.verifyTopUp = async (req, res) => {
       });
 
       if (existingTransaction) {
+        // The payment webhook may have credited it first: that's a success for
+        // the person who paid, not an error.
+        const WalletAccount = sequelize.models.WalletAccount;
+        const ownWallet = WalletAccount
+          ? await WalletAccount.findOne({ where: { id: existingTransaction.wallet_account_id, user_id: authenticatedUserId } })
+          : null;
+        if (ownWallet && existingTransaction.transaction_type === 'credit') {
+          return res.status(200).json({
+            success: true,
+            alreadyProcessed: true,
+            message: 'Top-up already credited',
+            transaction: {
+              reference,
+              amount: Number(existingTransaction.amount) / 100,
+              currency: existingTransaction.currency,
+              gateway
+            }
+          });
+        }
         return res.status(400).json({
           success: false,
           message: 'This payment has already been processed'
@@ -244,6 +264,17 @@ exports.verifyTopUp = async (req, res) => {
       return res.status(403).json({
         success: false,
         message: 'Unauthorized: User mismatch'
+      });
+    }
+
+    // Test money never reaches a real balance: record it and say so.
+    if (gatewayMode.isTestPayment(gateway, paymentData)) {
+      await gatewayMode.recordTestPayment({ reference, gateway, kind: 'topup', userId, amount, currency });
+      return res.status(200).json({
+        success: true,
+        testMode: true,
+        message: `Test top-up of ${amount} ${currency} received. Test money isn’t added to your balance.`,
+        transaction: { reference, amount, currency, gateway }
       });
     }
 

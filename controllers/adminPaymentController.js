@@ -25,3 +25,39 @@ exports.refund = handle((req) =>
   })
 );
 exports.recheck = handle((req) => refunds.recheck(req.params.id));
+
+// Creator earnings that never reached the ledger (super admin only).
+const missed = require('../services/missedEarningsService');
+const handleMissed = (action) => async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await action(req) });
+  } catch (error) {
+    if (error instanceof missed.MissedEarningsError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    console.error('[Admin Payments] Missed earnings request failed:', error);
+    return res.status(500).json({ success: false, message: 'Something went wrong. Please try again.' });
+  }
+};
+exports.listMissedEarnings = handleMissed(() => missed.listMissed());
+
+// Live and test mode for the payment gateways (super admin only).
+const gatewayMode = require('../services/gatewayModeService');
+const handleGateway = (action) => async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await action(req) });
+  } catch (error) {
+    if (error instanceof gatewayMode.GatewayModeError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    console.error('[Admin Payments] Gateway settings request failed:', error);
+    return res.status(500).json({ success: false, message: 'Something went wrong. Please try again.' });
+  }
+};
+exports.gatewaySettings = handleGateway(() => gatewayMode.getSettings());
+exports.setGatewayMode = handleGateway((req) =>
+  gatewayMode.setMode({ gateway: req.params.gateway, mode: req.body.mode, note: req.body.note, actor: req.user })
+);
+exports.addTestAccount = handleGateway((req) => gatewayMode.addTestAccount({ userId: req.body.userId, actor: req.user }));
+exports.removeTestAccount = handleGateway((req) => gatewayMode.removeTestAccount({ userId: req.params.userId }));
+exports.creditMissedEarnings = handleMissed((req) => missed.creditMissed({ purchaseIds: req.body.purchaseIds, actor: req.user }));

@@ -27,6 +27,11 @@ const crypto = require('crypto');
 const sequelize = require('../config/db');
 const { isRefundsReady } = require('../utils/ensureRefunds');
 const gateway = require('./refundGatewayService');
+const gatewayMode = require('./gatewayModeService');
+
+/** Gateway calls for a payment use the keys of the mode it was made in (a test payment refunds through test keys). */
+const inPaymentMode = async (gatewayName, reference, fn) =>
+  gatewayMode.runFixed(gatewayName, await gatewayMode.modeOfPayment(gatewayName, reference), fn);
 
 class RefundError extends Error {
   constructor(status, message, code) {
@@ -103,8 +108,9 @@ async function usersById(userIds, transaction) {
   return new Map(rows.map((r) => [Number(r.id), r]));
 }
 
-function shapePayment(row, content, buyer, refund) {
+function shapePayment(row, content, buyer, refund, isTest = false) {
   return {
+    isTest,
     source: row.source,
     id: row.id,
     reference: row.reference,
@@ -164,11 +170,14 @@ async function listPayments({ status, currency, search, page = 1, limit = 20 }) 
       : [],
   ]);
   const refundByRef = new Map(refunds.map((r) => [r.payment_reference, r]));
+  const testRefs = await gatewayMode.testReferences(rows.map((r) => r.reference));
 
   const summaryRows = await query(
     `${PAYMENTS_CTE}
      SELECT currency, status, COUNT(*)::int AS count, COALESCE(SUM(amount), 0) AS total
-       FROM payments GROUP BY currency, status`
+       FROM payments
+       ${gatewayMode.isReady() ? 'WHERE NOT EXISTS (SELECT 1 FROM test_payments t WHERE t.reference = payments.reference)' : ''}
+      GROUP BY currency, status`
   );
   const summary = {};
   for (const row of summaryRows) {
@@ -178,7 +187,7 @@ async function listPayments({ status, currency, search, page = 1, limit = 20 }) 
 
   return {
     items: rows.map((r) =>
-      shapePayment(r, contents.get(`${r.content_type}:${r.content_id}`), buyers.get(Number(r.buyer_id)), refundByRef.get(r.reference))
+      shapePayment(r, contents.get(`${r.content_type}:${r.content_id}`), buyers.get(Number(r.buyer_id)), refundByRef.get(r.reference), testRefs.has(r.reference))
     ),
     pagination: { page: current, limit: size, total, totalPages: Math.ceil(total / size) },
     summary,
@@ -350,12 +359,14 @@ const loadRefund = async (id, transaction) => {
 async function sendToGateway(row) {
   if (row.gateway_status) return true;
   try {
-    const result = await gateway.refund({
-      gateway: row.gateway,
-      reference: row.payment_reference,
-      idempotencyKey: row.id,
-      note: row.reason,
-    });
+    const result = await inPaymentMode(row.gateway, row.payment_reference, () =>
+      gateway.refund({
+        gateway: row.gateway,
+        reference: row.payment_reference,
+        idempotencyKey: row.id,
+        note: row.reason,
+      })
+    );
     if (gateway.outcomeOf(result.status) === 'failed') {
       await sequelize.query(
         `UPDATE payment_refunds SET status = 'failed', gateway_refund_id = :gid, gateway_status = :gs,
@@ -583,7 +594,9 @@ async function recheck(refundId) {
     row = await advance(row.id);
   } else if (row.status === 'completed' && row.gateway_refund_id && gateway.outcomeOf(row.gateway_status) === 'pending') {
     try {
-      const status = await gateway.refundStatus({ gateway: row.gateway, refundId: row.gateway_refund_id });
+      const status = await inPaymentMode(row.gateway, row.payment_reference, () =>
+        gateway.refundStatus({ gateway: row.gateway, refundId: row.gateway_refund_id })
+      );
       await sequelize.query('UPDATE payment_refunds SET gateway_status = :status, updated_at = NOW() WHERE id = :id', {
         replacements: { id: row.id, status },
       });

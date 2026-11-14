@@ -625,6 +625,11 @@ class PaymentRoutingService {
 
       console.log(`[Payment Routing] Processing ${currency} payment for user ${userId}, ${contentType} ${contentId}`);
 
+      // A test payment (the gateway says so) unlocks what was bought but never
+      // credits anyone: test money must not become withdrawable earnings.
+      const gatewayMode = require('./gatewayModeService');
+      const isTestPayment = gatewayMode.isTestPayment(gateway, paymentData);
+
       // Extract coupon data from payment metadata
       let couponId = null, originalPrice = null, discountAmount = null, partnerCommission = null, couponPartnerUserId = null;
       if (gateway === 'paystack') {
@@ -738,7 +743,7 @@ class PaymentRoutingService {
       // Resolve referral commission upfront (before crediting creator) so we can
       // deduct it from creator earnings at source. Skip if a coupon partner already applies.
       let referralInfo = null;
-      if (!couponPartnerUserId) {
+      if (!couponPartnerUserId && !isTestPayment) {
         referralInfo = await this._resolveReferralCommission({
           buyerUserId: userId,
           purchaseId: purchase.id,
@@ -747,7 +752,7 @@ class PaymentRoutingService {
       }
 
       // Get content creator and credit their multi-currency wallet (skip for courses)
-      if (contentType !== 'special_course') {
+      if (contentType !== 'special_course' && !isTestPayment) {
         const creatorId = await this.getContentCreatorId(contentType, contentId);
         
         if (creatorId) {
@@ -894,6 +899,11 @@ class PaymentRoutingService {
       }
 
       await transaction.commit();
+
+      if (isTestPayment) {
+        console.log(`[Payment Routing] Test payment ${reference}: access granted, no wallet credits`);
+        await gatewayMode.recordTestPayment({ reference, gateway, kind: 'purchase', userId, amount, currency });
+      }
 
       return {
         success: true,

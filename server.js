@@ -53,6 +53,8 @@ const { ensureUserInsights } = require('./utils/ensureUserInsights');
 const { ensureEmailTracking } = require('./utils/ensureEmailTracking');
 const { ensureAdminFoundations } = require('./utils/ensureAdminFoundations');
 const { ensureRefunds } = require('./utils/ensureRefunds');
+const { ensureLedgerReferences } = require('./utils/ensureLedgerReferences');
+const { ensureGatewayModes } = require('./utils/ensureGatewayModes');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -163,6 +165,8 @@ app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 // Logs successful staff changes after the response is sent (see middleware).
 app.use(staffActionLogger);
+// Buyer checkouts by payment test accounts (or with a gateway in test mode) use test keys.
+app.use(require('./middleware/paymentModeContext'));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 
@@ -245,6 +249,10 @@ sequelize.sync({ force: false })
   .then(() => ensureAdminFoundations())
   // Same: only staff refunds depend on this.
   .then(() => ensureRefunds())
+  // Same: lets Stripe sale credits (66-character references) reach the wallet ledger.
+  .then(() => ensureLedgerReferences())
+  // Same: without it every payment simply stays live.
+  .then(() => ensureGatewayModes())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

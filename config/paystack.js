@@ -12,6 +12,14 @@ const paystackClient = axios.create({
   }
 });
 
+// Live or test key per request (see services/gatewayModeService.js). Outside a
+// buyer checkout, webhook or refund this is always the live key, as before.
+paystackClient.interceptors.request.use((config) => {
+  const key = require('../services/gatewayModeService').secretKeyFor('paystack');
+  config.headers.Authorization = `Bearer ${key}`;
+  return config;
+});
+
 module.exports = {
   paystackClient,
   PAYSTACK_SECRET_KEY: process.env.PAYSTACK_SECRET_KEY,

@@ -237,15 +237,18 @@ class FreebiePaymentService {
     // Verify with gateway
     let amountPaid;
     let couponId = null;
+    let isTest = false;
 
     if (currency === 'NGN') {
       const result = await this._verifyPaystack(paymentReference);
       amountPaid = result.amountPaid;
       couponId = result.metadata?.couponId || null;
+      isTest = result.isTest;
     } else if (currency === 'USD') {
       const result = await this._verifyStripe(paymentReference);
       amountPaid = result.amountPaid;
       couponId = result.metadata?.couponId || null;
+      isTest = result.isTest;
     } else {
       const err = new Error('Unsupported currency');
       err.statusCode = 400;
@@ -264,8 +267,9 @@ class FreebiePaymentService {
         couponId: couponId || null
       }, { transaction: t });
 
-      // Credit creator wallet — full amount, no platform fee at purchase time
-      await walletService.creditWallet({
+      // Credit creator wallet — full amount, no platform fee at purchase time.
+      // Test payments never credit anyone.
+      if (!isTest) await walletService.creditWallet({
         userId: freebie.userId,
         currency,
         amount: amountPaid,
@@ -325,7 +329,8 @@ class FreebiePaymentService {
 
     return {
       amountPaid: response.data.data.amount / 100, // kobo → naira
-      metadata: response.data.data.metadata || {}
+      metadata: response.data.data.metadata || {},
+      isTest: require('./gatewayModeService').isTestPayment('paystack', response.data.data)
     };
   }
 
@@ -340,7 +345,8 @@ class FreebiePaymentService {
 
     return {
       amountPaid: session.amount_total / 100, // cents → dollars
-      metadata: session.metadata || {}
+      metadata: session.metadata || {},
+      isTest: require('./gatewayModeService').isTestPayment('stripe', session)
     };
   }
 

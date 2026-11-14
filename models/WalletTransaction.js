@@ -44,7 +44,8 @@ const WalletTransaction = sequelize.define('WalletTransaction', {
     allowNull: false
   },
   reference: {
-    type: DataTypes.STRING(50),
+    // Was 50, too short for Stripe session ids (~66). See utils/ensureLedgerReferences.js.
+    type: DataTypes.STRING(255),
     allowNull: false,
     unique: true
   },
