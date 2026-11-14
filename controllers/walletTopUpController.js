@@ -42,7 +42,9 @@ exports.initializeTopUp = async (req, res) => {
     walletService.validateAmount(amount);
 
     // Minimum top-up amounts
-    const minimums = { NGN: 1000, USD: 1 };
+    // Editable in the admin (Platform settings); defaults ₦1,000 and $1 as before.
+    const settings = require('../services/platformSettingsService');
+    const minimums = { NGN: settings.get('min_topup_ngn'), USD: settings.get('min_topup_usd') };
     if (amount < minimums[currency]) {
       return res.status(400).json({
         success: false,

@@ -3,7 +3,6 @@ const { stripeClient } = require('../config/stripe');
 const Payout = require('../models/Payout');
 const { lockAmountForWithdrawal } = require('../services/walletService');
 
-const PLATFORM_FEE_PERCENTAGE = parseFloat(process.env.PLATFORM_FEE_PERCENTAGE) || 0.10;
 
 /**
  * Calculate payout fees
@@ -12,7 +11,8 @@ const PLATFORM_FEE_PERCENTAGE = parseFloat(process.env.PLATFORM_FEE_PERCENTAGE) 
  * @returns {object} - Fee breakdown
  */
 function calculatePayoutFees(amount, gateway = 'paystack') {
-  const platformFee = amount * PLATFORM_FEE_PERCENTAGE;
+  // Editable in the admin (Platform settings); defaults to PLATFORM_FEE_PERCENTAGE as before.
+  const platformFee = amount * require('./platformSettingsService').fraction('withdrawal_fee_percent');
   
   let gatewayFee = 0;
   

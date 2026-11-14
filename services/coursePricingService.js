@@ -12,23 +12,21 @@
  */
 
 class CoursePricingService {
-  constructor() {
-    // Load pricing from environment variables
-    this.PRICES = {
-      individual: {
-        NGN: parseInt(process.env.COURSE_PRICE_INDIVIDUAL_NGN) || 25000,
-        USD: parseInt(process.env.COURSE_PRICE_INDIVIDUAL_USD) || 30
-      },
-      monthly: {
-        NGN: parseInt(process.env.COURSE_PRICE_MONTHLY_NGN) || 35000,
-        USD: parseInt(process.env.COURSE_PRICE_MONTHLY_USD) || 42
-      },
-      yearly: {
-        NGN: parseInt(process.env.COURSE_PRICE_YEARLY_NGN) || 280000,
-        USD: parseInt(process.env.COURSE_PRICE_YEARLY_USD) || 336
-      }
+  /**
+   * Current prices, read on every use so staff can change them in the admin
+   * (Platform settings) without a redeploy. Defaults are the environment
+   * values used before — see services/platformSettingsService.js.
+   */
+  get PRICES() {
+    const setting = require('./platformSettingsService').get;
+    return {
+      individual: { NGN: setting('course_price_individual_ngn'), USD: setting('course_price_individual_usd') },
+      monthly: { NGN: setting('course_price_monthly_ngn'), USD: setting('course_price_monthly_usd') },
+      yearly: { NGN: setting('course_price_yearly_ngn'), USD: setting('course_price_yearly_usd') }
     };
+  }
 
+  constructor() {
     this.PROMO_PRICES = {
       individual: {
         NGN: parseInt(process.env.PROMO_PRICE_INDIVIDUAL_NGN) || 20000,
