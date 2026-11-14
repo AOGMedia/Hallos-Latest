@@ -1,4 +1,5 @@
 const PaymentRoutingService = require('../services/paymentRoutingService');
+const gatewayMode = require('../services/gatewayModeService');
 const Purchase = require('../models/Purchase');
 const Video = require('../models/Video');
 const LiveClass = require('../models/liveClass');
@@ -224,6 +225,7 @@ exports.verifyPayment = async (req, res) => {
 
       let amount;
       let userId;
+      let isTest = false;
       const currencyUpper = currency.toUpperCase();
 
       if (currencyUpper === 'NGN') {
@@ -234,6 +236,7 @@ exports.verifyPayment = async (req, res) => {
         }
         amount = response.data.data.amount / 100;
         userId = parseInt(response.data.data.metadata.userId);
+        isTest = gatewayMode.isTestPayment('paystack', response.data.data);
       } else if (currencyUpper === 'USD') {
         // For Stripe top-ups the reference is the session_id passed via query
         const sessionId = req.query.session_id;
@@ -246,8 +249,22 @@ exports.verifyPayment = async (req, res) => {
         }
         amount = session.amount_total / 100;
         userId = parseInt(session.metadata.userId);
+        isTest = gatewayMode.isTestPayment('stripe', session);
       } else {
         return res.status(400).json({ success: false, message: 'Unsupported currency for top-up' });
+      }
+
+      // Test money never reaches a real balance: record it and say so.
+      if (isTest) {
+        const gatewayName = currencyUpper === 'NGN' ? 'paystack' : 'stripe';
+        await gatewayMode.recordTestPayment({ reference, gateway: gatewayName, kind: 'topup', userId, amount, currency: currencyUpper });
+        return res.status(200).json({
+          success: true,
+          testMode: true,
+          message: `Test top-up of ${amount} ${currencyUpper} received. Test money isn’t added to your balance.`,
+          currency: currencyUpper,
+          amount
+        });
       }
 
       // Credit the wallet

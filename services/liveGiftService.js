@@ -129,7 +129,9 @@ const sendGift = async ({ senderId, recipientId, contentType, contentId, content
       }
 
       const amount = toMinor(gift.prices[currency]);
-      const hostAmount = Math.floor((amount * HOST_SHARE_PERCENT) / 100);
+      // Editable in the admin (Platform settings); defaults to HOST_SHARE_PERCENT (80%) as before.
+      const hostShare = require('./platformSettingsService').get('gift_host_share_percent');
+      const hostAmount = Math.floor((amount * hostShare) / 100);
       const platformFee = amount - hostAmount;
       const giftId = uuidv4();
       const senderWallet = walletOf(senderId, currency);

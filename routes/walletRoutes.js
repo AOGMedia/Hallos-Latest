@@ -6,6 +6,7 @@ const withdrawal2FAController = require('../controllers/withdrawal2FAController'
 const currencyWithdrawalController = require('../controllers/currencyWithdrawalController');
 const transactionHistoryController = require('../controllers/transactionHistoryController');
 const authMiddleware = require('../middleware/authMiddleware');
+const requireSuperAdmin = require('../middleware/requireSuperAdmin');
 const fraudDetectionMiddleware = require('../middleware/fraudDetectionMiddleware');
 const withdrawalLimitMiddleware = require('../middleware/withdrawalLimitMiddleware');
 const withdrawal2FAMiddleware = require('../middleware/withdrawal2FAMiddleware');
@@ -170,8 +171,12 @@ router.post('/initialize',
 );
 
 // Credit wallet (for earnings, refunds, etc.)
-router.post('/credit', 
-  authMiddleware, 
+// Super admins only: it credits the caller's wallet with any amount they send,
+// so it must never be open to ordinary accounts. No app calls it; staff adjust
+// wallets through the admin's audited wallet-adjustment tool instead.
+router.post('/credit',
+  authMiddleware,
+  requireSuperAdmin,
   walletOperations, 
   fraudDetectionMiddleware.walletOperations, 
   walletController.creditWallet

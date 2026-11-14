@@ -10,6 +10,12 @@ const CourseEnrollment = require('../models/CourseEnrollment');
 const { withAvatar } = require('../utils/userAvatar');
 const { lastLoginsFor } = require('../services/userLoginService');
 
+/** Revenue counts real money only: payments made with test keys are left out. */
+const realMoney = () =>
+  require('../services/gatewayModeService').isReady()
+    ? { [Op.and]: [literal('NOT EXISTS (SELECT 1 FROM test_payments t WHERE t.reference = "Purchase"."payment_reference")')] }
+    : {};
+
 /**
  * Admin Dashboard Controller
  *
@@ -52,7 +58,7 @@ exports.getDashboard = async (req, res) => {
 
     // ── Revenue (completed purchases) ──
     const revenueRows = await Purchase.findAll({
-      where: { paymentStatus: 'completed' },
+      where: { paymentStatus: 'completed', ...realMoney() },
       attributes: [
         'currency',
         [fn('SUM', col('amount')), 'total'],
@@ -68,7 +74,7 @@ exports.getDashboard = async (req, res) => {
     });
 
     const revenueLast30Rows = await Purchase.findAll({
-      where: { paymentStatus: 'completed', createdAt: { [Op.gte]: last30 } },
+      where: { paymentStatus: 'completed', createdAt: { [Op.gte]: last30 }, ...realMoney() },
       attributes: [
         'currency',
         [fn('SUM', col('amount')), 'total'],
@@ -85,7 +91,7 @@ exports.getDashboard = async (req, res) => {
 
     // ── Revenue by content type (all time) ──
     const revenueByTypeRows = await Purchase.findAll({
-      where: { paymentStatus: 'completed' },
+      where: { paymentStatus: 'completed', ...realMoney() },
       attributes: [
         'contentType',
         'currency',
@@ -497,7 +503,7 @@ exports.getContentStats = async (req, res) => {
 
     // Revenue per content type
     const revenueRows = await Purchase.findAll({
-      where: { paymentStatus: 'completed' },
+      where: { paymentStatus: 'completed', ...realMoney() },
       attributes: [
         'contentType',
         'currency',
@@ -547,6 +553,7 @@ exports.getRevenue = async (req, res) => {
       where: {
         paymentStatus: 'completed',
         currency: currency.toUpperCase(),
+        ...realMoney(),
         createdAt: { [Op.gte]: since },
       },
       attributes: [

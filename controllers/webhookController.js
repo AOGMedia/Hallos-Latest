@@ -8,6 +8,7 @@ const Payout = require('../models/Payout');
 const Wallet = require('../models/Wallet');
 const Transaction = require('../models/Transaction');
 const sequelize = require('../config/db');
+const gatewayMode = require('../services/gatewayModeService');
 const { sendPurchaseConfirmationEmail, sendSaleNotificationEmail } = require('../utils/email');
 const User = require('../models/User');
 const Video = require('../models/Video');
@@ -21,7 +22,14 @@ const webhookSecurityService = new WebhookSecurityService();
  * Handle Paystack Webhook with Enhanced Security
  * POST /api/webhooks/paystack
  */
-exports.handlePaystackWebhook = async (req, res) => {
+// Each webhook runs in the mode the gateway signed it with (live or test), so a
+// test event is checked against the test secret and handled with test keys.
+exports.handlePaystackWebhook = (req, res) => {
+  const mode = gatewayMode.paystackWebhookMode(JSON.stringify(req.body), req.headers['x-paystack-signature']) || 'live';
+  return gatewayMode.runFixed('paystack', mode, () => handlePaystackWebhookInMode(req, res));
+};
+
+const handlePaystackWebhookInMode = async (req, res) => {
   try {
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     const signature = req.headers['x-paystack-signature'];
@@ -32,7 +40,7 @@ exports.handlePaystackWebhook = async (req, res) => {
       provider: 'paystack',
       payload,
       signature,
-      secret: PAYSTACK_WEBHOOK_SECRET,
+      secret: gatewayMode.webhookSecretFor('paystack'),
       eventId: req.body.data?.reference || `paystack_${Date.now()}`,
       clientIP
     });
@@ -73,6 +81,13 @@ exports.handlePaystackWebhook = async (req, res) => {
             console.log('[Paystack Webhook] Top-up already processed:', reference);
             return res.status(200).send('Already processed');
           }
+        }
+
+        // Test money never reaches a real balance.
+        if (gatewayMode.isTestPayment('paystack', event.data)) {
+          await gatewayMode.recordTestPayment({ reference, gateway: 'paystack', kind: 'topup', userId: parseInt(userId), amount: amount / 100, currency: currency.toUpperCase() });
+          console.log('[Paystack Webhook] Test top-up recorded, not credited:', reference);
+          return res.status(200).send('Test top-up recorded');
         }
 
         await walletService.creditWallet({
@@ -484,7 +499,13 @@ exports.unblockIP = async (req, res) => {
  * Handle Stripe Webhook with Enhanced Security
  * POST /api/webhooks/stripe
  */
-exports.handleStripeWebhook = async (req, res) => {
+exports.handleStripeWebhook = (req, res) => {
+  const payload = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : String(req.body || '');
+  const mode = gatewayMode.stripeWebhookMode(stripeClient.webhooks, payload, req.headers['stripe-signature']) || 'live';
+  return gatewayMode.runFixed('stripe', mode, () => handleStripeWebhookInMode(req, res));
+};
+
+const handleStripeWebhookInMode = async (req, res) => {
   try {
     const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     const signature = req.headers['stripe-signature'];
@@ -498,7 +519,7 @@ exports.handleStripeWebhook = async (req, res) => {
       event = stripeClient.webhooks.constructEvent(
         payload,
         signature,
-        STRIPE_WEBHOOK_SECRET
+        gatewayMode.webhookSecretFor('stripe')
       );
     } catch (err) {
       console.error('[Stripe Webhook] Signature verification failed:', err.message);
@@ -510,7 +531,7 @@ exports.handleStripeWebhook = async (req, res) => {
       provider: 'stripe',
       payload,
       signature,
-      secret: STRIPE_WEBHOOK_SECRET,
+      secret: gatewayMode.webhookSecretFor('stripe'),
       eventId: event.id || `stripe_${Date.now()}`,
       clientIP
     });
@@ -543,20 +564,33 @@ exports.handleStripeWebhook = async (req, res) => {
         const MultiCurrencyWalletService = require('../services/multiCurrencyWalletService');
         const walletService = new MultiCurrencyWalletService();
 
+        // Same reference the verify step credits under (topup_...), so the
+        // ledger's unique reference lets only one of the two credit the wallet.
+        const topUpReference = session.metadata.reference || session.id;
         const WalletTransaction = sequelize.models.WalletTransaction;
         if (WalletTransaction) {
-          const existing = await WalletTransaction.findOne({ where: { reference: session.id } });
+          const { Op } = require('sequelize');
+          const existing = await WalletTransaction.findOne({
+            where: { reference: { [Op.in]: [...new Set([topUpReference, session.id])] } }
+          });
           if (existing) {
-            console.log('[Stripe Webhook] Top-up already processed:', session.id);
+            console.log('[Stripe Webhook] Top-up already processed:', topUpReference);
             return res.status(200).json({ received: true });
           }
+        }
+
+        // Test money never reaches a real balance.
+        if (gatewayMode.isTestPayment('stripe', session)) {
+          await gatewayMode.recordTestPayment({ reference: topUpReference, gateway: 'stripe', kind: 'topup', userId, amount: session.amount_total / 100, currency: 'USD' });
+          console.log('[Stripe Webhook] Test top-up recorded, not credited:', topUpReference);
+          return res.status(200).json({ received: true });
         }
 
         await walletService.creditWallet({
           userId,
           currency: 'USD',
           amount: session.amount_total / 100,
-          reference: session.id,
+          reference: topUpReference,
           description: 'Wallet top-up via Stripe',
           metadata: { gateway: 'stripe', type: 'topup', externalReference: session.id }
         });

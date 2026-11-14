@@ -690,16 +690,13 @@ exports.zegoCloudHeartbeat = async (req, res) => {
 
 exports.getAllLiveClasses = async (req, res) => {
   try {
-    const { status, privacy, category, showAll, limit = 20, offset = 0 } = req.query;
-    
+    const { status, category, showAll, limit = 20, offset = 0 } = req.query;
+
     const filters = {};
-    
-    // Filter by privacy if provided (default to public for unauthenticated users)
-    if (privacy) {
-      filters.privacy = privacy;
-    } else {
-      filters.privacy = 'public'; // Only show public classes by default
-    }
+
+    // This list is public: it only ever shows public classes. It used to honour
+    // ?privacy=private, which let anyone list private classes; no app asks for that.
+    filters.privacy = 'public';
     
     // 🎯 KEY CHANGE: Default to only show active classes for better UX
     if (status) {
@@ -725,7 +722,8 @@ exports.getAllLiveClasses = async (req, res) => {
         {
           model: LiveHost,
           as: 'hosts',
-          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'email', 'socialLinks'] }]
+          // Public list: no email addresses.
+          include: [{ model: User, attributes: ['id', 'firstname', 'lastname', 'socialLinks'] }]
         }
       ]
     });
