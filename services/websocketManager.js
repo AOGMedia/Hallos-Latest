@@ -95,6 +95,7 @@ class WebSocketManager {
         }
         socket.userId = Number(decoded.id || decoded.userId);
         socket.user = decoded;
+        require('./activityTrackingService').noteActive(socket.userId); // counts quiz play as activity; never throws
 
         next();
       } catch (error) {
