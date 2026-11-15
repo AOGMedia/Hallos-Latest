@@ -57,6 +57,7 @@ const { ensureLedgerReferences } = require('./utils/ensureLedgerReferences');
 const { ensureGatewayModes } = require('./utils/ensureGatewayModes');
 const { ensurePlatformSettings } = require('./utils/ensurePlatformSettings');
 const { ensureUserActivity } = require('./utils/ensureUserActivity');
+const { ensureAnnouncements } = require('./utils/ensureAnnouncements');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -211,6 +212,7 @@ app.use('/api/campaigns', campaignRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
+app.use('/api/announcements', require('./routes/announcementRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/uploads', express.static('uploads'));
 
@@ -259,6 +261,8 @@ sequelize.sync({ force: false })
   .then(() => ensurePlatformSettings())
   // Same: without it active users simply aren't recorded.
   .then(() => ensureUserActivity())
+  // Same: without it no banners show.
+  .then(() => ensureAnnouncements())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

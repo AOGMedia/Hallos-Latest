@@ -10,6 +10,11 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['GET', /^\/revenue\/?$/, 'dashboard.view'],
   ['GET', /^\/content-stats\/?$/, 'dashboard.view'],
   ['GET', /^\/insights\/(engagement|funnel|creators)\/?$/, 'dashboard.view'],
+  ['GET', /^\/announcements\/?$/, 'notifications.view'],
+  ['POST', /^\/announcements\/?$/, 'notifications.manage'],
+  ['PUT', /^\/announcements\/[^/]+\/?$/, 'notifications.manage'],
+  ['POST', /^\/announcements\/[^/]+\/end\/?$/, 'notifications.manage'],
+  ['DELETE', /^\/announcements\/[^/]+\/?$/, 'notifications.manage'],
 
   ['GET', /^\/users\/?$/, 'users.view'],
   ['GET', /^\/users\/[^/]+\/?$/, 'users.view'],

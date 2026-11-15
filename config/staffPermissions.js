@@ -136,8 +136,8 @@ const PERMISSION_GROUPS = [
     key: 'notifications',
     label: 'Notifications',
     permissions: [
-      { code: 'notifications.view', label: 'See delivery logs and digests' },
-      { code: 'notifications.manage', label: 'Trigger digests' },
+      { code: 'notifications.view', label: 'See delivery logs, digests and announcements' },
+      { code: 'notifications.manage', label: 'Trigger digests and publish announcements' },
     ],
   },
   {
