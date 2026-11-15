@@ -22,6 +22,7 @@ const extractUserFromToken = (req) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY);
     // A suspended account is treated as signed out here.
     if (require('../services/suspensionService').isSuspended(decoded.id)) return null;
+    if (require('../services/accountDeletionService').isDeleted(decoded.id)) return null;
     require('../services/activityTrackingService').noteActive(decoded.id); // never throws
     return decoded;
   } catch (error) {

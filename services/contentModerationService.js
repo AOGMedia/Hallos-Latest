@@ -245,6 +245,11 @@ async function createReport({ reporterId, targetType, targetId, reason, details 
     if (error.name === 'SequelizeUniqueConstraintError' || error.parent?.code === '23505') return { received: true, duplicate: true };
     throw error;
   }
+  // Staff who turned this alert on hear about it (returns at once, never throws).
+  require('./staffAlertService').notify('reports.new', {
+    title: `New report: ${targetType.replace('_', ' ')}`,
+    lines: [`Reason: ${reason.replace(/_/g, ' ')}`, details ? `Details: ${String(details).trim().slice(0, 300)}` : null],
+  });
   return { received: true, duplicate: false };
 }
 
