@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { isSuspended, suspendedResponse } = require('../services/suspensionService');
+const { noteActive } = require('../services/activityTrackingService');
 const SECRET_KEY = process.env.JWT_SECRET_KEY;
 
 module.exports = (req, res, next) => {
@@ -19,6 +20,8 @@ module.exports = (req, res, next) => {
     // In-memory lookup; see services/suspensionService.
     if (isSuspended(decoded.id)) return res.status(403).json(suspendedResponse(decoded.id));
     req.user = decoded;
+    // Counts this person as active today (one write per person per day; never throws).
+    noteActive(decoded.id);
     next();
   } catch (error) {
     return res.status(401).json({ message: 'Invalid token.' });

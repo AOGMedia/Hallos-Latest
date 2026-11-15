@@ -78,6 +78,20 @@ exports.listSettings = handleSettings(() => settings.list());
 exports.updateSetting = handleSettings((req) => settings.set({ key: req.params.key, value: req.body.value, note: req.body.note, actor: req.user }));
 exports.resetSetting = handleSettings((req) => settings.reset({ key: req.params.key, actor: req.user }));
 
+// Growth insights: engagement, funnel, creator leaderboard (dashboard.view).
+const insights = require('../services/insightsService');
+const handleInsights = (action) => async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await action(req) });
+  } catch (error) {
+    console.error('[Admin Insights] Request failed:', error);
+    return res.status(500).json({ success: false, message: 'Couldn’t load these numbers. Please try again.' });
+  }
+};
+exports.engagement = handleInsights((req) => insights.engagement({ days: req.query.days }));
+exports.funnel = handleInsights((req) => insights.funnel({ days: req.query.days }));
+exports.creatorLeaderboard = handleInsights((req) => insights.creators({ days: req.query.days, currency: req.query.currency }));
+
 // Payments that reached a gateway but never got recorded (super admin only).
 const stuck = require('../services/stuckPaymentsService');
 const handleStuck = (action) => async (req, res) => {

@@ -56,6 +56,7 @@ const { ensureRefunds } = require('./utils/ensureRefunds');
 const { ensureLedgerReferences } = require('./utils/ensureLedgerReferences');
 const { ensureGatewayModes } = require('./utils/ensureGatewayModes');
 const { ensurePlatformSettings } = require('./utils/ensurePlatformSettings');
+const { ensureUserActivity } = require('./utils/ensureUserActivity');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -256,6 +257,8 @@ sequelize.sync({ force: false })
   .then(() => ensureGatewayModes())
   // Same: without it every setting keeps its built-in default.
   .then(() => ensurePlatformSettings())
+  // Same: without it active users simply aren't recorded.
+  .then(() => ensureUserActivity())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

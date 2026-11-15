@@ -242,6 +242,9 @@ router.post('/payments/test-accounts', requireSuperAdmin, adminPaymentController
 router.delete('/payments/test-accounts/:userId', requireSuperAdmin, adminPaymentController.removeTestAccount);
 router.get('/payments/stuck', requireSuperAdmin, adminPaymentController.listStuckPayments);
 router.post('/payments/stuck/settle', requireSuperAdmin, adminPaymentController.settleStuckPayment);
+router.get('/insights/engagement', adminPaymentController.engagement);
+router.get('/insights/funnel', adminPaymentController.funnel);
+router.get('/insights/creators', adminPaymentController.creatorLeaderboard);
 router.get('/settings', requireSuperAdmin, adminPaymentController.listSettings);
 router.put('/settings/:key', requireSuperAdmin, adminPaymentController.updateSetting);
 router.delete('/settings/:key', requireSuperAdmin, adminPaymentController.resetSetting);

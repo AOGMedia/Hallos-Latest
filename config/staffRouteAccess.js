@@ -9,6 +9,7 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['GET', /^\/dashboard\/?$/, 'dashboard.view'],
   ['GET', /^\/revenue\/?$/, 'dashboard.view'],
   ['GET', /^\/content-stats\/?$/, 'dashboard.view'],
+  ['GET', /^\/insights\/(engagement|funnel|creators)\/?$/, 'dashboard.view'],
 
   ['GET', /^\/users\/?$/, 'users.view'],
   ['GET', /^\/users\/[^/]+\/?$/, 'users.view'],
