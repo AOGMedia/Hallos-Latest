@@ -351,6 +351,13 @@ exports.getPayouts = async (req, res) => {
 
     const where = {};
     if (status) where.status = status;
+    // Optional search (the admin's search box): account name, transfer reference or bank.
+    const search = String(req.query.search || '').trim().slice(0, 100);
+    if (search) {
+      const { Op } = require('sequelize');
+      const like = `%${search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+      where[Op.or] = [{ accountName: { [Op.iLike]: like } }, { transferReference: { [Op.iLike]: like } }, { bankName: { [Op.iLike]: like } }];
+    }
 
     const { count, rows } = await Payout.findAndCountAll({
       where,

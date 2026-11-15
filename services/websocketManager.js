@@ -93,6 +93,9 @@ class WebSocketManager {
         if (require('./suspensionService').isSuspended(decoded.id || decoded.userId)) {
           return next(new Error('Account suspended'));
         }
+        if (require('./accountDeletionService').isDeleted(decoded.id || decoded.userId)) {
+          return next(new Error('Account deleted'));
+        }
         socket.userId = Number(decoded.id || decoded.userId);
         socket.user = decoded;
         require('./activityTrackingService').noteActive(socket.userId); // counts quiz play as activity; never throws

@@ -241,7 +241,19 @@ exports.initiateWithdrawal = async (req, res) => {
           // Log but don't throw - the main error is more important
         }
       }
-      
+
+      // Staff who turned this alert on hear about it (returns at once, never throws).
+      require('../services/staffAlertService').notify('payouts.failed', {
+        title: `A ${currency} withdrawal failed`,
+        lines: [
+          `Creator: #${userId}`,
+          `Amount: ${currency} ${Number(amount).toLocaleString('en-US')}`,
+          `Gateway: ${gateway}`,
+          `Error: ${String(processingError.message || 'Unknown').slice(0, 200)}`,
+          fundsLocked ? 'The money was returned to their wallet.' : null,
+        ],
+      });
+
       return res.status(500).json({
         success: false,
         message: processingError.message || 'Failed to process withdrawal',

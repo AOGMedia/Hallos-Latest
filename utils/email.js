@@ -1728,6 +1728,120 @@ exports.sendRefundIssuedEmail = async (to, firstname, contentTitle, amount, curr
   });
 };
 
+const formatDay = (value) =>
+  new Date(value).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+
+/** To the person: we got their request to delete their account, and how to change their mind. */
+exports.sendAccountDeletionRequestedEmail = async (to, firstname, scheduledFor) => {
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>We’ve received your request to delete your account</h2>
+      <p>Dear ${escapeHtml(firstname || 'there')},</p>
+      <p>
+        Your Hallos account is scheduled to be deleted after <strong>${formatDay(scheduledFor)}</strong>.
+        Until then everything works as normal.
+      </p>
+      <p>
+        <strong>Changed your mind?</strong> Sign in and open Settings, then choose “Keep my account”.
+        Nothing will be deleted.
+      </p>
+      <p>
+        Before then, withdraw any money in your wallet and download a copy of your data from Settings
+        if you’d like to keep it. Once your account is deleted it can’t be brought back.
+      </p>
+      <p>If you didn’t ask for this, sign in and cancel it straight away, then change your password, or contact support@hallos.net.</p>
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: 'Your account deletion request',
+    html,
+  });
+};
+
+/** To the person: staff couldn't delete the account yet, with their note. */
+exports.sendAccountDeletionDeclinedEmail = async (to, firstname, note) => {
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>We couldn’t delete your account yet</h2>
+      <p>Dear ${escapeHtml(firstname || 'there')},</p>
+      <p>Your account hasn’t been deleted. Here’s why:</p>
+      <p style="padding: 12px 16px; background: #f4f2fd; border-radius: 8px;">${escapeHtml(note)}</p>
+      <p>Once that’s sorted, you can ask again from Settings. If you have questions, reply to this email or contact support@hallos.net.</p>
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: 'About your account deletion request',
+    html,
+  });
+};
+
+/** To the person's old address: the account has been deleted. */
+exports.sendAccountDeletedEmail = async (to, firstname) => {
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+      <h2>Your account has been deleted</h2>
+      <p>Dear ${escapeHtml(firstname || 'there')},</p>
+      <p>
+        As you asked, your Hallos account has been deleted and your personal details removed.
+        We keep payment records only where the law requires it, and they no longer identify you.
+      </p>
+      <p>Thank you for being part of Hallos. You’re always welcome back with a new account.</p>
+      <p><strong>The hallos Team</strong></p>
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: 'Your Hallos account has been deleted',
+    html,
+  });
+};
+
+/**
+ * To a staff member who turned this alert on (admin → Email alerts). Plain and
+ * short: what happened, the key facts, one button to act on it.
+ */
+exports.sendStaffAlertEmail = async (to, firstname, { title, lines = [], moreSince = 0, actionLabel, actionUrl, quietMinutes }) => {
+  const facts = lines
+    .filter(Boolean)
+    .map((line) => `<li style="margin: 4px 0;">${escapeHtml(line)}</li>`)
+    .join('');
+  const more = moreSince > 0
+    ? `<p style="color: #555;">Plus ${moreSince} more since your last alert.</p>`
+    : '';
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; max-width: 560px;">
+      <p style="color: #6a57e5; font-weight: bold; margin: 0 0 8px;">Hallos staff alert</p>
+      <h2 style="margin: 0 0 12px;">${escapeHtml(title)}</h2>
+      ${facts ? `<ul style="padding-left: 18px; color: #333;">${facts}</ul>` : ''}
+      ${more}
+      <p style="margin: 24px 0;">
+        <a href="${escapeHtml(actionUrl)}" style="background: #6a57e5; color: #ffffff; padding: 12px 22px; border-radius: 999px; text-decoration: none; font-weight: bold;">
+          ${escapeHtml(actionLabel)}
+        </a>
+      </p>
+      <p style="color: #888; font-size: 12px;">
+        Hi ${escapeHtml(firstname || 'there')}, you get this because you turned on this alert in the Hallos admin
+        (Email alerts). To keep inboxes calm we send at most one every ${Number(quietMinutes) || 15} minutes per alert.
+      </p>
+    </div>
+  `;
+  await transporter.sendMail({
+    from: `"hallos Alerts" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `[Hallos] ${String(title).slice(0, 140)}`,
+    html,
+  });
+};
+
 /** To the creator: a sale was refunded and what came back out of their earnings. */
 exports.sendSaleRefundedEmail = async (to, creatorName, contentTitle, amountTaken, currency) => {
   const title = escapeHtml(contentTitle || 'one of your items');

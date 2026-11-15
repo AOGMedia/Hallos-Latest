@@ -23,6 +23,11 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['POST', /^\/users\/[^/]+\/email\/?$/, 'users.email'],
   ['POST', /^\/users\/email-images\/?$/, 'users.email'],
   ['POST', /^\/users\/[^/]+\/wallet-adjustments\/?$/, 'users.wallet'],
+  ['GET', /^\/users\/[^/]+\/account-deletion\/?$/, 'users.view'],
+  ['GET', /^\/users\/[^/]+\/export\/?$/, 'users.export'],
+  ['GET', /^\/account-deletions\/?$/, 'users.view'],
+  // Declining can be delegated; completing a deletion stays super-admin only (no rule = admin only).
+  ['POST', /^\/account-deletions\/[^/]+\/reject\/?$/, 'users.delete'],
 
   ['GET', /^\/live\/(overview|classes|series)\/?$/, 'live.view'],
   ['GET', /^\/live\/(classes|series)\/[^/]+\/?$/, 'live.view'],
@@ -61,7 +66,7 @@ const ADMIN_ROUTE_PERMISSIONS = [
  * Mounted after /api/admin in server.js, so their requests pass through the
  * admin router first. Each of these routers enforces its own permissions.
  */
-const ADMIN_DELEGATED_PATHS = /^\/(coupons|communities|live-series)(\/|$)/;
+const ADMIN_DELEGATED_PATHS = /^\/(coupons|communities|live-series|search)(\/|$)/;
 
 const COUPON_ROUTE_PERMISSIONS = [
   ['GET', /^\/?$/, 'coupons.view'],

@@ -270,6 +270,13 @@ router.post('/users/:id/email', userActionLimiter, adminUserController.sendEmail
 router.post('/users/email-images', userActionLimiter, require('../controllers/emailImageController').receiveImage,
   require('../controllers/emailImageController').uploadEmailImage);
 router.post('/users/:id/wallet-adjustments', userActionLimiter, adminUserController.adjustWallet);
+// Account deletion requests and data export.
+router.get('/users/:id/account-deletion', adminUserController.getAccountDeletion);
+router.get('/users/:id/export', userActionLimiter, adminUserController.exportUserData);
+router.get('/account-deletions', adminUserController.listAccountDeletions);
+// Only a super admin can actually delete an account; people can only ask.
+router.post('/account-deletions/:id/complete', require('../middleware/requireSuperAdmin'), userActionLimiter, adminUserController.completeAccountDeletion);
+router.post('/account-deletions/:id/reject', userActionLimiter, adminUserController.rejectAccountDeletion);
 
 // Payout management
 router.get('/payouts', adminDashboardController.getPayouts);

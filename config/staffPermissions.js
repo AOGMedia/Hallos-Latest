@@ -20,6 +20,8 @@ const PERMISSION_GROUPS = [
       { code: 'users.email', label: 'Send a user a personal email', risky: true },
       { code: 'users.wallet', label: 'Credit or debit a user’s wallet', risky: true },
       { code: 'users.suspend', label: 'Suspend or reinstate a user', risky: true },
+      { code: 'users.export', label: 'Download a copy of a user’s data', risky: true },
+      { code: 'users.delete', label: 'Decline account deletion requests (only a super admin can delete)', risky: true },
     ],
   },
   {

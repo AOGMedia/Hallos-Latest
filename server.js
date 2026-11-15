@@ -58,6 +58,8 @@ const { ensureGatewayModes } = require('./utils/ensureGatewayModes');
 const { ensurePlatformSettings } = require('./utils/ensurePlatformSettings');
 const { ensureUserActivity } = require('./utils/ensureUserActivity');
 const { ensureAnnouncements } = require('./utils/ensureAnnouncements');
+const { ensureAccountDeletion } = require('./utils/ensureAccountDeletion');
+const { ensureStaffAlerts } = require('./utils/ensureStaffAlerts');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -208,11 +210,15 @@ app.use('/api/coupons', couponRoutes);
 app.use('/api/admin/coupons', adminCouponRoutes);
 app.use('/api/communities', communityRoutes);
 app.use('/api/admin/communities', adminCommunityRoutes);
+// The admin's one search box (passes through /api/admin as a delegated path).
+app.use('/api/admin/search', require('./routes/adminSearchRoutes'));
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/blog', blogRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
 app.use('/api/announcements', require('./routes/announcementRoutes'));
+app.use('/api/account', require('./routes/accountRoutes'));
+app.use('/api/staff-alerts', require('./routes/staffAlertRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
 app.use('/uploads', express.static('uploads'));
 
@@ -263,6 +269,10 @@ sequelize.sync({ force: false })
   .then(() => ensureUserActivity())
   // Same: without it no banners show.
   .then(() => ensureAnnouncements())
+  // Same: without it people can't ask to delete their account (they're told why).
+  .then(() => ensureAccountDeletion())
+  // Same: without it no staff alert emails are sent.
+  .then(() => ensureStaffAlerts())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
