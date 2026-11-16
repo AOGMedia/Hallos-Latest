@@ -1,6 +1,20 @@
 const { LiveSeries, LiveSession } = require('../models/liveSeriesIndex');
 const Purchase = require('../models/Purchase');
+const sequelize = require('../config/db');
 const { Op } = require('sequelize');
+
+/** An error the controller turns into a 4xx with this message. */
+const scheduleError = (code, message) => Object.assign(new Error(message), { code });
+
+/** A session somebody actually ran (or is running): never moved or renumbered. */
+const wasHeld = (session) =>
+  session.status === 'ended' || session.status === 'live' || !!session.actualStartTime;
+
+/** Server-local calendar day — the unit sessions are generated on. */
+const localDayKey = (value) => {
+  const d = new Date(value);
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+};
 
 /**
  * Live Series Service
@@ -395,6 +409,163 @@ class LiveSeriesService {
     }
   }
   
+  /**
+   * Move a series to new days, a new start time and/or a new start date.
+   *
+   * Only sessions that haven't happened are touched:
+   *  - Not started yet (no session has run): every scheduled session is
+   *    replaced, so a new start date can move the whole series.
+   *  - Already started: sessions that ran, are live or are in the past stay as
+   *    they are; the scheduled ones still to come are replaced.
+   *
+   * Replaced sessions keep their ids, in order, so join links creators have
+   * shared (/live/join/<sessionId>) still open the next classes. Extra
+   * sessions are added and leftover ones removed. Upcoming sessions are
+   * numbered on from the last kept one, and a session whose time changed gets
+   * its 1-hour reminder again.
+   *
+   * Everything (sessions and the series' own fields) is written in one
+   * transaction, under the same per-series lock that guards session creation.
+   *
+   * @param {Object} series - LiveSeries instance
+   * @param {Object} change
+   * @param {string[]} change.days - Lowercase weekday names
+   * @param {string} change.startTime - 'HH:MM'
+   * @param {Date|null} [change.startDate] - New start date (only before the series has started)
+   * @param {Date|null} [change.endDate] - New (later) end date, if also extended
+   * @param {Object} [change.seriesUpdates] - Other series fields to save in the same transaction
+   * @param {Date} [change.now]
+   * @returns {Promise<{ upcomingCount: number, created: number, removed: number, moved: number, nextSession: Object|null }>}
+   */
+  async rescheduleSeries(series, { days, startTime, startDate = null, endDate = null, seriesUpdates = {}, now = new Date() }) {
+    const current = typeof series.recurrencePattern === 'string'
+      ? JSON.parse(series.recurrencePattern)
+      : series.recurrencePattern;
+    const pattern = {
+      ...current,
+      days: days.map((d) => String(d).toLowerCase()),
+      startTime,
+      duration: Number(current.duration)
+    };
+
+    return sequelize.transaction(async (transaction) => {
+      await sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:seriesId))', {
+        replacements: { seriesId: String(series.id) },
+        transaction
+      });
+
+      const sessions = await LiveSession.findAll({
+        where: { seriesId: series.id },
+        order: [['scheduledStartTime', 'ASC'], ['sessionNumber', 'ASC']],
+        transaction
+      });
+
+      if (sessions.some((s) => s.status === 'live')) {
+        throw scheduleError('SESSION_LIVE', 'End the live session before changing the schedule');
+      }
+      const started = sessions.some(wasHeld);
+      if (startDate && started) {
+        throw scheduleError('ALREADY_STARTED', "The start date can't change once the first session has run");
+      }
+
+      const replaceable = sessions.filter((s) =>
+        s.status === 'scheduled' &&
+        !s.actualStartTime &&
+        (!started || new Date(s.scheduledStartTime) > now)
+      );
+      const replaceableIds = new Set(replaceable.map((s) => s.id));
+      const kept = sessions.filter((s) => !replaceableIds.has(s.id));
+
+      // Same day-by-day rule as when the series was created. From the start
+      // date if it's still ahead, otherwise from today; never in the past, and
+      // never a second class on a day one has already run.
+      const effectiveStart = new Date(startDate || series.startDate);
+      const effectiveEnd = new Date(endDate || series.endDate);
+      let windowStart = effectiveStart;
+      if (windowStart <= now) {
+        windowStart = new Date(now);
+        windowStart.setHours(0, 0, 0, 0);
+      }
+      const heldDays = new Set(kept.filter(wasHeld).map((s) => localDayKey(s.scheduledStartTime)));
+      const generated = this.generateSessionSchedule({
+        id: series.id,
+        recurrencePattern: pattern,
+        startDate: windowStart,
+        endDate: effectiveEnd
+      }).filter((s) => s.scheduledStartTime > now && !heldDays.has(localDayKey(s.scheduledStartTime)));
+
+      if (generated.length === 0) {
+        throw scheduleError(
+          'NO_SESSIONS',
+          'No sessions fall on the chosen days between the start and end dates. Pick other days or a later end date.'
+        );
+      }
+
+      // Upcoming sessions are numbered on from the last kept one.
+      const base = kept.reduce((max, s) => Math.max(max, Number(s.sessionNumber) || 0), 0);
+      generated.forEach((s, i) => { s.sessionNumber = base + i + 1; });
+
+      const reuseCount = Math.min(replaceable.length, generated.length);
+      const reused = replaceable.slice(0, reuseCount);
+      const surplus = replaceable.slice(reuseCount);
+      const extra = generated.slice(reuseCount);
+
+      if (surplus.length > 0) {
+        await LiveSession.destroy({ where: { id: surplus.map((s) => s.id) }, transaction });
+      }
+
+      // (series_id, session_number) is unique: park renumbered rows on
+      // temporary negative numbers first so no update collides mid-way.
+      const renumbered = reused.filter((s, i) => s.sessionNumber !== generated[i].sessionNumber);
+      for (const [i, s] of renumbered.entries()) {
+        await s.update({ sessionNumber: -(i + 1) }, { transaction });
+      }
+
+      let moved = 0;
+      for (const [i, s] of reused.entries()) {
+        const next = generated[i];
+        const timeChanged =
+          new Date(s.scheduledStartTime).getTime() !== next.scheduledStartTime.getTime() ||
+          new Date(s.scheduledEndTime).getTime() !== next.scheduledEndTime.getTime();
+        if (!timeChanged && s.sessionNumber === next.sessionNumber) continue;
+        const changes = { sessionNumber: next.sessionNumber };
+        if (timeChanged) {
+          moved += 1;
+          Object.assign(changes, {
+            scheduledStartTime: next.scheduledStartTime,
+            scheduledEndTime: next.scheduledEndTime,
+            reminderSent: false
+          });
+        }
+        await s.update(changes, { transaction });
+      }
+
+      if (extra.length > 0) {
+        await LiveSession.bulkCreate(extra, { transaction });
+      }
+
+      await series.update({
+        ...seriesUpdates,
+        recurrencePattern: pattern,
+        ...(startDate ? { startDate } : {}),
+        ...(endDate ? { endDate } : {})
+      }, { transaction });
+
+      const first = generated[0];
+      return {
+        upcomingCount: generated.length,
+        created: extra.length,
+        removed: surplus.length,
+        moved,
+        nextSession: {
+          id: reused[0] ? reused[0].id : null,
+          sessionNumber: first.sessionNumber,
+          scheduledStartTime: first.scheduledStartTime
+        }
+      };
+    });
+  }
+
   /**
    * Validate recurrence pattern
    * @param {Object} pattern - Recurrence pattern object

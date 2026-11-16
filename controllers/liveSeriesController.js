@@ -7,6 +7,66 @@ const { readIdempotencyKey, isIdempotencyConflict } = require('../utils/idempote
 const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
 const { resolveSeriesProvider, seriesProviderOf } = require('../utils/liveProviders');
 const { withAvatar } = require('../utils/userAvatar');
+const { notifyScheduleChanged } = require('../services/seriesScheduleNotifier');
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/** Two dates (or date strings) on the same UTC calendar day. */
+const sameUtcDay = (a, b) => {
+  const x = new Date(a);
+  const y = new Date(b);
+  if (Number.isNaN(x.getTime()) || Number.isNaN(y.getTime())) return false;
+  return x.toISOString().slice(0, 10) === y.toISOString().slice(0, 10);
+};
+
+/**
+ * What an update asks to change about a series' schedule: weekdays, start
+ * time, start date. Anything missing keeps its current value, so older
+ * clients that never send these see no change.
+ *
+ * @returns {{ error?: string, changed?: boolean, days?: string[], startTime?: string, startDate?: Date|null }}
+ */
+const readScheduleChange = (series, { startDate, recurrencePattern }) => {
+  const current = typeof series.recurrencePattern === 'string'
+    ? JSON.parse(series.recurrencePattern)
+    : series.recurrencePattern || {};
+  const requested = recurrencePattern && typeof recurrencePattern === 'object' ? recurrencePattern : {};
+
+  let days = current.days || [];
+  if (requested.days !== undefined) {
+    if (!Array.isArray(requested.days) || requested.days.length === 0) {
+      return { error: 'Pick at least one day of the week' };
+    }
+    days = [...new Set(requested.days.map((d) => String(d).toLowerCase().trim()))];
+    if (days.some((d) => !WEEKDAYS.includes(d))) {
+      return { error: 'Invalid day of the week' };
+    }
+  }
+
+  let startTime = current.startTime;
+  if (requested.startTime !== undefined) {
+    startTime = String(requested.startTime).trim();
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) {
+      return { error: 'Start time must be in HH:MM (24-hour) format' };
+    }
+  }
+
+  let newStart = null;
+  if (startDate && !sameUtcDay(startDate, series.startDate)) {
+    newStart = new Date(startDate);
+    if (Number.isNaN(newStart.getTime())) {
+      return { error: 'Invalid start date' };
+    }
+  }
+
+  const sortedKey = (list) => [...list].map((d) => String(d).toLowerCase()).sort().join(',');
+  const changed =
+    sortedKey(days) !== sortedKey(current.days || []) ||
+    startTime !== current.startTime ||
+    newStart !== null;
+
+  return { changed, days, startTime, startDate: newStart };
+};
 
 /** The series creator with avatarUrl (and without the socialLinks loaded to read it). */
 const creatorWithAvatar = (series) => {
@@ -510,8 +570,19 @@ exports.updateSeries = async (req, res) => {
       privacy,
       maxParticipants,
       endDate,
+      startDate,
       streamingProvider
     } = req.body;
+    let { recurrencePattern } = req.body;
+
+    // Sent as a JSON string when the form carries a thumbnail upload.
+    if (typeof recurrencePattern === 'string') {
+      try {
+        recurrencePattern = JSON.parse(recurrencePattern);
+      } catch (parseError) {
+        return res.status(400).json({ success: false, message: 'Invalid schedule format' });
+      }
+    }
 
     // Get series
     const series = await LiveSeries.findByPk(id);
@@ -563,12 +634,26 @@ exports.updateSeries = async (req, res) => {
       updates.streamingProvider = providerChoice.provider;
     }
 
-    // Handle end date extension
+    // Schedule: days, start time and (before the first session) start date.
+    // Only counts as a change when something actually differs — the edit
+    // form sends the current values back on every save.
+    const schedule = readScheduleChange(series, { startDate, recurrencePattern });
+    if (schedule.error) {
+      return res.status(400).json({ success: false, message: schedule.error });
+    }
+
+    // Handle end date extension. The same day as the current end is no change
+    // (the edit form sends it back on every save).
     let newSessionsGenerated = 0;
-    if (endDate) {
-      const newEndDate = new Date(endDate);
+    let newEndDate = null;
+    if (endDate && !sameUtcDay(endDate, series.endDate)) {
+      newEndDate = new Date(endDate);
       const currentEndDate = new Date(series.endDate);
-      
+
+      if (Number.isNaN(newEndDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid end date' });
+      }
+
       // Validate: new end date must be after current end date (extension only)
       if (newEndDate <= currentEndDate) {
         return res.status(400).json({
@@ -584,21 +669,86 @@ exports.updateSeries = async (req, res) => {
           message: 'End date must be in the future'
         });
       }
-      
-      console.log(`[Live Series Controller] Extending series ${id} end date from ${currentEndDate} to ${newEndDate}`);
-      
+    }
+
+    if (schedule.changed) {
+      if (series.status !== 'active') {
+        return res.status(400).json({
+          success: false,
+          message: "This series has ended or was cancelled, so its schedule can't change"
+        });
+      }
+      if (schedule.startDate) {
+        if (schedule.startDate < new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Start date cannot be more than 24 hours in the past'
+          });
+        }
+        if (schedule.startDate >= (newEndDate || new Date(series.endDate))) {
+          return res.status(400).json({ success: false, message: 'Start date must be before the end date' });
+        }
+      }
+
+      // Sessions and series fields (including any end-date extension) are
+      // saved together; the reschedule covers the extended period itself.
+      let result;
+      try {
+        result = await liveSeriesService.rescheduleSeries(series, {
+          days: schedule.days,
+          startTime: schedule.startTime,
+          startDate: schedule.startDate,
+          endDate: newEndDate,
+          seriesUpdates: updates
+        });
+      } catch (scheduleErr) {
+        const status = { SESSION_LIVE: 409, ALREADY_STARTED: 409, NO_SESSIONS: 400 }[scheduleErr.code];
+        if (status) {
+          return res.status(status).json({ success: false, message: scheduleErr.message });
+        }
+        throw scheduleErr;
+      }
+
+      // Tell attendees; never holds up or fails the save.
+      let attendeesNotified = 0;
+      try {
+        attendeesNotified = await notifyScheduleChanged(series, result.nextSession);
+      } catch (notifyErr) {
+        console.error('[Live Series Controller] Schedule change notification error:', notifyErr);
+      }
+
+      return res.json({
+        success: true,
+        message: attendeesNotified > 0
+          ? `Schedule updated. ${attendeesNotified} attendee${attendeesNotified === 1 ? '' : 's'} will get an email.`
+          : 'Schedule updated.',
+        series: {
+          ...series.dataValues,
+          pricing: series.getDualPricing()
+        },
+        rescheduled: {
+          upcomingSessions: result.upcomingCount,
+          nextSession: result.nextSession,
+          attendeesNotified
+        }
+      });
+    }
+
+    if (newEndDate) {
+      console.log(`[Live Series Controller] Extending series ${id} end date from ${series.endDate} to ${newEndDate}`);
+
       // Update end date
       updates.endDate = newEndDate;
-      
+
       // Generate additional sessions for the extended period
       const additionalSessions = await liveSeriesService.extendSeriesSessions(series, newEndDate);
       newSessionsGenerated = additionalSessions.length;
-      
+
       console.log(`[Live Series Controller] Generated ${newSessionsGenerated} additional sessions`);
     }
-    
+
     await series.update(updates);
-    
+
     const response = {
       success: true,
       message: 'Series updated successfully',
@@ -607,7 +757,7 @@ exports.updateSeries = async (req, res) => {
         pricing: series.getDualPricing()
       }
     };
-    
+
     // Include info about new sessions if end date was extended
     if (newSessionsGenerated > 0) {
       response.message = `Series updated successfully. ${newSessionsGenerated} additional session(s) generated.`;
