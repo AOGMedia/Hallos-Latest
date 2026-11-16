@@ -7,8 +7,20 @@ const adminMiddleware = require('../middleware/adminMiddleware');
 
 // ── REGISTRATION ──────────────────────────────────────────────────────────────
 
+// Notes who's signed in (to link the registration to their account) but never
+// blocks: a missing or invalid token just means no link, exactly as before.
+const noteSignedIn = (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '') || req.cookies?.token;
+  if (token) {
+    try {
+      req.user = require('jsonwebtoken').verify(token, process.env.JWT_SECRET_KEY);
+    } catch (_) { /* treat as signed out */ }
+  }
+  next();
+};
+
 // Public — no auth required
-router.post('/register', campaignController.registerForCampaign);
+router.post('/register', noteSignedIn, campaignController.registerForCampaign);
 
 // Admin only — list all registrations
 router.get('/registrations', authMiddleware, adminMiddleware, campaignController.getRegistrations);

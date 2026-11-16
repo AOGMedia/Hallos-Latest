@@ -131,6 +131,16 @@ describe('normalizeAudience', () => {
   it('defaults to filters mode', () => {
     expect(normalizeAudience({}).mode).toBe('filters');
     expect(normalizeAudience({ mode: 'selected' }).mode).toBe('selected');
+    expect(normalizeAudience({ mode: 'nope' }).mode).toBe('filters');
+  });
+
+  it('accepts event registrants, paid by default, and cleans left-out emails', () => {
+    const a = normalizeAudience({ mode: 'event', excludeEmails: ['Ada@X.com', 'not-an-email', "x' OR 1=1--"] });
+    expect(a.mode).toBe('event');
+    expect(a.event.payment).toBe('paid');
+    expect(a.excludeEmails).toEqual(['ada@x.com']);
+    expect(normalizeAudience({ mode: 'event', event: { payment: 'unpaid' } }).event.payment).toBe('unpaid');
+    expect(normalizeAudience({ mode: 'event', event: { payment: 'bogus' } }).event.payment).toBe('paid');
   });
 });
 

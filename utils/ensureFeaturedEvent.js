@@ -18,6 +18,7 @@ const STATEMENTS = [
 ];
 
 let ready = false;
+let registrationUserReady = false;
 
 async function ensureFeaturedEvent() {
   try {
@@ -29,6 +30,22 @@ async function ensureFeaturedEvent() {
   } catch (error) {
     console.error('⚠️ Featured event settings setup failed; the events page uses its defaults:', error.message);
   }
+
+  // Which account made each registration (registering needs sign-in). Nullable,
+  // no default, so adding it is instant; older rows are matched by email instead.
+  // Separate step: if it fails, registrations simply aren't linked.
+  try {
+    await sequelize.query('ALTER TABLE campaign_registrations ADD COLUMN IF NOT EXISTS user_id INTEGER');
+    await sequelize.query('CREATE INDEX IF NOT EXISTS campaign_registrations_user_id ON campaign_registrations (user_id)');
+    registrationUserReady = true;
+  } catch (error) {
+    console.error('⚠️ Could not link event registrations to accounts:', error.message);
+  }
 }
 
-module.exports = { ensureFeaturedEvent, isFeaturedEventReady: () => ready };
+module.exports = {
+  ensureFeaturedEvent,
+  isFeaturedEventReady: () => ready,
+  /** True once campaign_registrations.user_id exists. */
+  isRegistrationUserReady: () => registrationUserReady,
+};

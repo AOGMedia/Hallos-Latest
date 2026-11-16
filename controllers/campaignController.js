@@ -92,6 +92,16 @@ exports.registerForCampaign = async (req, res) => {
       currency: 'NGN'
     });
 
+    // Link it to the signed-in account. Not part of the model on purpose, so
+    // registration keeps working even if the column couldn't be added.
+    if (req.user?.id && require('../utils/ensureFeaturedEvent').isRegistrationUserReady()) {
+      await CampaignRegistration.sequelize
+        .query('UPDATE campaign_registrations SET user_id = :userId WHERE id = :id', {
+          replacements: { userId: Number(req.user.id), id: registration.id },
+        })
+        .catch((error) => console.warn('[Campaign] Could not link registration to account:', error.message));
+    }
+
     // Initialize Paystack transaction
     const paystackResponse = await paystackClient.post('/transaction/initialize', {
       email: registration.email,
