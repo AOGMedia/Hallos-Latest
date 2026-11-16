@@ -155,7 +155,9 @@ exports.verifyPayment = async (req, res) => {
             firstName: registration.firstName,
             lastName: registration.lastName,
             email: registration.email,
-            paymentStatus: registration.paymentStatus
+            paymentStatus: registration.paymentStatus,
+            amount: Number(registration.amount),
+            currency: registration.currency
           }
         });
       }
@@ -194,7 +196,9 @@ exports.verifyPayment = async (req, res) => {
           firstName: registration.firstName,
           lastName: registration.lastName,
           email: registration.email,
-          paymentStatus: 'completed'
+          paymentStatus: 'completed',
+          amount: Number(registration.amount),
+          currency: registration.currency
         }
       });
     }

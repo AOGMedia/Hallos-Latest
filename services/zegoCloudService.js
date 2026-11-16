@@ -255,13 +255,14 @@ class ZegoCloudService {
   }
 
   async removeParticipant(roomId, userId, reason = 'removed') {
-    console.log(`Participant ${userId} removed from room ${roomId}. Reason: ${reason}`);
-    return { success: true, roomId, userId, removedAt: new Date(), reason, message: 'Participant access revoked' };
+    const why = reason || 'removed'; // null/empty means "no particular reason"
+    console.log(`Participant ${userId} removed from room ${roomId}. Reason: ${why}`);
+    return { success: true, roomId, userId, removedAt: new Date(), reason: why, message: 'Participant access revoked' };
   }
 
   async getParticipants(roomId) {
     console.log(`Retrieving participants for room ${roomId}`);
-    return { success: true, roomId, participants: [], participantCount: 0, retrievedAt: new Date() };
+    return { success: true, roomId, participants: [], participantCount: 0, retrievedAt: new Date(), message: 'Participants retrieved successfully' };
   }
 
   async getRoomInfo(roomId) {

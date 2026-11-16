@@ -1,6 +1,36 @@
 const fc = require('fast-check');
 const { idempotencyService, IdempotencyConflictError } = require('../../services/idempotencyService');
 const sequelize = require('../../config/db');
+// Writes to a real database: runs only against a test one (see tests/helpers/dbTestGuard.js).
+const { describeWithDb } = require('../helpers/dbTestGuard');
+
+// fast-check reuses (and shrinks to) the same keys across runs; each run starts from a clean key.
+const freshKey = (key) => sequelize.query('DELETE FROM idempotency_keys WHERE key = :key', { replacements: { key } });
+
+// Keys the service accepts (UUID versions 1-5; fast-check 4 would also produce 6-15).
+const keyArb = () => fc.uuid({ version: [1, 2, 3, 4, 5] });
+
+// idempotency_keys.user_id must point at a real user, so the tests make two of their own.
+const users = { a: null, b: null };
+const TEST_EMAILS = ['idempotency-test-a@test.invalid', 'idempotency-test-b@test.invalid'];
+async function createTestUsers() {
+  const ids = [];
+  for (const email of TEST_EMAILS) {
+    const [rows] = await sequelize.query(
+      `INSERT INTO "Users" (firstname, lastname, email, role, "createdAt", "updatedAt")
+       VALUES ('Idempotency', 'Test', :email, 'viewer', NOW(), NOW())
+       ON CONFLICT (email) DO UPDATE SET firstname = EXCLUDED.firstname
+       RETURNING id`,
+      { replacements: { email } }
+    );
+    ids.push(rows[0].id);
+  }
+  [users.a, users.b] = ids;
+}
+async function removeTestUsers() {
+  await sequelize.query(`DELETE FROM idempotency_keys WHERE user_id IN (SELECT id FROM "Users" WHERE email IN (:emails))`, { replacements: { emails: TEST_EMAILS } });
+  await sequelize.query(`DELETE FROM "Users" WHERE email IN (:emails)`, { replacements: { emails: TEST_EMAILS } });
+}
 
 /**
  * Property-Based Tests for Idempotency Manager
@@ -11,19 +41,20 @@ const sequelize = require('../../config/db');
  * Validates: Requirements 1.1, 1.2, 1.3
  */
 
-describe('Idempotency Manager Property Tests', () => {
+describeWithDb('Idempotency Manager Property Tests', () => {
   
   beforeAll(async () => {
     // Ensure database connection
     await sequelize.authenticate();
+    await createTestUsers();
   });
   
   afterAll(async () => {
-    // Clean up test data
+    // Clean up test data (the connection is closed once, after both groups).
     await sequelize.query('DELETE FROM idempotency_keys WHERE operation_type LIKE \'test_%\'');
-    await sequelize.close();
+    await removeTestUsers();
   });
-  
+
   beforeEach(async () => {
     // Clean up before each test
     await sequelize.query('DELETE FROM idempotency_keys WHERE operation_type LIKE \'test_%\'');
@@ -43,8 +74,8 @@ describe('Idempotency Manager Property Tests', () => {
     await fc.assert(
       fc.asyncProperty(
         // Generate test data
-        fc.uuid(),                    // idempotency key
-        fc.integer({ min: 1, max: 1000 }), // user ID
+        keyArb(),                    // idempotency key
+        fc.constantFrom(users.a, users.b), // user ID (the test's own users)
         fc.constantFrom('test_withdrawal', 'test_payment', 'test_transfer'), // operation type
         fc.record({                   // operation data
           amount: fc.integer({ min: 100, max: 1000000 }),
@@ -60,6 +91,7 @@ describe('Idempotency Manager Property Tests', () => {
         }),
         
         async (idempotencyKey, userId, operationType, operationData, operationResult) => {
+          await freshKey(idempotencyKey);
           // First execution - should be new
           const firstCheck = await idempotencyService.checkAndStore(
             idempotencyKey, 
@@ -122,8 +154,8 @@ describe('Idempotency Manager Property Tests', () => {
   test('Property 1b: Idempotency Conflict - Different parameters rejected', async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.uuid(),                    // idempotency key
-        fc.integer({ min: 1, max: 1000 }), // user ID
+        keyArb(),                    // idempotency key
+        fc.constantFrom(users.a, users.b), // user ID (the test's own users)
         fc.constantFrom('test_withdrawal', 'test_payment'), // operation type
         fc.record({                   // first operation data
           amount: fc.integer({ min: 100, max: 500000 }),
@@ -139,7 +171,8 @@ describe('Idempotency Manager Property Tests', () => {
         async (idempotencyKey, userId, operationType, firstOperationData, secondOperationData) => {
           // Ensure the operation data is actually different
           fc.pre(!idempotencyService.operationsMatch(firstOperationData, secondOperationData));
-          
+          await freshKey(idempotencyKey);
+
           // First execution with first operation data
           const firstCheck = await idempotencyService.checkAndStore(
             idempotencyKey, 
@@ -170,18 +203,19 @@ describe('Idempotency Manager Property Tests', () => {
 
   /**
    * Property 1c: User Isolation
-   * 
-   * Idempotency keys should be isolated per user - the same key used by 
-   * different users should not conflict.
-   * 
+   *
+   * A key belongs to the user who first used it (the table's primary key is the
+   * key alone). Another user presenting the same key is refused with a
+   * conflict, and never sees the first user's stored result.
+   *
    * Validates: Requirements 1.1, 1.2
    */
-  test('Property 1c: User Isolation - Same key different users allowed', async () => {
+  test('Property 1c: User Isolation - Same key, different user is refused', async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.uuid(),                    // idempotency key
-        fc.integer({ min: 1, max: 500 }),   // first user ID
-        fc.integer({ min: 501, max: 1000 }), // second user ID (different range)
+        keyArb(),                    // idempotency key
+        fc.constant(users.a),   // first user ID
+        fc.constant(users.b), // second user ID
         fc.constantFrom('test_payment', 'test_transfer'), // operation type
         fc.record({                   // operation data
           amount: fc.integer({ min: 100, max: 1000000 }),
@@ -192,7 +226,8 @@ describe('Idempotency Manager Property Tests', () => {
         async (idempotencyKey, userId1, userId2, operationType, operationData) => {
           // Ensure users are different
           fc.pre(userId1 !== userId2);
-          
+          await freshKey(idempotencyKey);
+
           // First user uses the idempotency key
           const firstUserCheck = await idempotencyService.checkAndStore(
             idempotencyKey, 
@@ -202,19 +237,18 @@ describe('Idempotency Manager Property Tests', () => {
           );
           
           expect(firstUserCheck.isNew).toBe(true);
-          
-          // Second user uses the same idempotency key - should be allowed
-          const secondUserCheck = await idempotencyService.checkAndStore(
-            idempotencyKey, 
-            userId2, 
-            operationType, 
-            operationData
-          );
-          
-          expect(secondUserCheck.isNew).toBe(true);
-          expect(secondUserCheck.lockAcquired).toBe(true);
-          
-          // But if first user tries to use same key with different params, should conflict
+
+          // Second user presents the same key - refused, and gets nothing of the first user's
+          await expect(
+            idempotencyService.checkAndStore(
+              idempotencyKey,
+              userId2,
+              operationType,
+              operationData
+            )
+          ).rejects.toThrow(IdempotencyConflictError);
+
+          // And if first user tries to use same key with different params, should conflict
           const differentOperationData = {
             ...operationData,
             amount: operationData.amount + 1000
@@ -247,8 +281,8 @@ describe('Idempotency Manager Property Tests', () => {
   test('Property 1d: Key Expiration - Expired keys allow new operations', async () => {
     await fc.assert(
       fc.asyncProperty(
-        fc.uuid(),                    // idempotency key
-        fc.integer({ min: 1, max: 1000 }), // user ID
+        keyArb(),                    // idempotency key
+        fc.constantFrom(users.a, users.b), // user ID (the test's own users)
         fc.constantFrom('test_withdrawal', 'test_payment'), // operation type
         fc.record({                   // operation data
           amount: fc.integer({ min: 100, max: 1000000 }),
@@ -257,6 +291,7 @@ describe('Idempotency Manager Property Tests', () => {
         }),
         
         async (idempotencyKey, userId, operationType, operationData) => {
+          await freshKey(idempotencyKey);
           // Create an expired idempotency key by directly inserting into database
           await sequelize.query(`
             INSERT INTO idempotency_keys (key, user_id, operation_type, operation_data, status, created_at, expires_at)
@@ -347,8 +382,13 @@ describe('Idempotency Manager Property Tests', () => {
 /**
  * Unit Tests for Edge Cases
  */
-describe('Idempotency Manager Unit Tests', () => {
-  
+describeWithDb('Idempotency Manager Unit Tests', () => {
+  beforeAll(createTestUsers);
+  afterAll(async () => {
+    await sequelize.query('DELETE FROM idempotency_keys WHERE operation_type LIKE \'unit_test_%\'');
+    await removeTestUsers();
+  });
+
   beforeEach(async () => {
     await sequelize.query('DELETE FROM idempotency_keys WHERE operation_type LIKE \'unit_test_%\'');
   });
@@ -377,7 +417,7 @@ describe('Idempotency Manager Unit Tests', () => {
 
   test('should handle concurrent access correctly', async () => {
     const key = idempotencyService.generateKey();
-    const userId = 1;
+    const userId = users.a;
     const operationType = 'unit_test_concurrent';
     const operationData = { amount: 1000, currency: 'NGN' };
 
@@ -395,4 +435,9 @@ describe('Idempotency Manager Unit Tests', () => {
     expect(newResults).toHaveLength(1);
     expect(duplicateResults.length).toBeGreaterThan(0);
   });
+});
+
+// One connection for the whole file: close it after both groups have run.
+afterAll(async () => {
+  await sequelize.close();
 });

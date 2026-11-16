@@ -3,7 +3,7 @@ const request = require('supertest');
 const express = require('express');
 const zegoCloudController = require('../controllers/zegoCloudController');
 const { zegoCloudService } = require('../services/zegoCloudService');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
 const User = require('../models/User');
 
 /**
@@ -16,8 +16,10 @@ const User = require('../models/User');
 
 // Mock dependencies
 jest.mock('../services/zegoCloudService');
-jest.mock('../models/LiveClass');
+jest.mock('../models/liveClass');
 jest.mock('../models/User');
+// Co-host lookup used by the controller's privacy check (no co-hosts in these tests).
+jest.mock('../models/liveIndex', () => ({ LiveHost: { findOne: jest.fn().mockResolvedValue(null) } }));
 
 // Create Express app for testing
 const createTestApp = () => {
@@ -107,7 +109,6 @@ describe('ZegoCloud Controller Properties', () => {
             zego_room_id: mockRoomResult.roomId,
             zego_app_id: mockRoomResult.appId,
             streaming_provider: 'zegocloud',
-            zego_room_token: mockRoomResult.creatorToken,
             max_participants: roomData.maxParticipants || null,
             status: 'live'
           });
@@ -141,22 +142,15 @@ describe('ZegoCloud Controller Properties', () => {
           // Mock User.findByPk
           const mockUser = {
             id: 1,
-            name: 'Test User',
+            firstname: 'Test',
             email: 'test@example.com',
             avatar: 'avatar_url'
           };
           User.findByPk.mockResolvedValue(mockUser);
 
-          // Mock zegoCloudService.addParticipant
-          const mockJoinResult = {
-            token: 'participant_token',
-            userInfo: {
-              displayName: mockUser.name,
-              avatar: mockUser.avatar,
-              email: mockUser.email
-            }
-          };
-          zegoCloudService.addParticipant.mockResolvedValue(mockJoinResult);
+          // The controller issues the join token directly (official ZegoCloud token)
+          const mockJoinResult = { token: 'participant_token' };
+          zegoCloudService.generateToken.mockReturnValue(mockJoinResult.token);
 
           const response = await request(app)
             .post('/join-room')
@@ -172,17 +166,17 @@ describe('ZegoCloud Controller Properties', () => {
           expect(response.body.data.token).toBe(mockJoinResult.token);
           expect(response.body.data.role).toBe(joinData.role);
           expect(response.body.data.liveClass.id).toBe(joinData.liveClassId);
+          expect(response.body.data.userInfo).toEqual({
+            displayName: mockUser.firstname,
+            avatar: mockUser.avatar,
+            email: mockUser.email
+          });
 
-          // Verify service was called correctly
-          expect(zegoCloudService.addParticipant).toHaveBeenCalledWith(
+          // Verify the token was issued for this room, user and role
+          expect(zegoCloudService.generateToken).toHaveBeenCalledWith(
             mockLiveClass.zego_room_id,
             1,
-            joinData.role,
-            {
-              displayName: mockUser.name,
-              avatar: mockUser.avatar,
-              email: mockUser.email
-            }
+            joinData.role
           );
         }
       ),

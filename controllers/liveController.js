@@ -392,7 +392,9 @@ exports.getLiveClassById = async (req, res) => {
         name: `${live.creator.firstname} ${live.creator.lastname}`.trim(),
         firstname: live.creator.firstname,
         lastname: live.creator.lastname,
-        avatarUrl: avatarUrlOf(live.creator)
+        avatarUrl: avatarUrlOf(live.creator),
+        // The email is personal: only super admins (and the creator) see it.
+        ...(user && (user.role === 'admin' || Number(user.id) === Number(live.creator.id)) ? { email: live.creator.email } : {})
       } : null,
       // Access flags
       hasAccess,

@@ -148,7 +148,9 @@ describe('Currency Isolation Property Tests', () => {
         (currency, amountCents) => {
           const amount = amountCents / 100;
 
-          if (amount > 0 && amount < 999999) {
+          // Generated amounts go up to 999,999, well under the service's 999,999,999 cap,
+          // so every positive one is valid (the old "< 999999" wrongly made 999,999 invalid).
+          if (amount > 0) {
             // Valid amounts should not throw
             expect(() => {
               walletService.validateAmount(amount);

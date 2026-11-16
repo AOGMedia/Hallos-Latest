@@ -15,6 +15,9 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['PUT', /^\/announcements\/[^/]+\/?$/, 'notifications.manage'],
   ['POST', /^\/announcements\/[^/]+\/end\/?$/, 'notifications.manage'],
   ['DELETE', /^\/announcements\/[^/]+\/?$/, 'notifications.manage'],
+  ['GET', /^\/event\/?$/, 'events.view'],
+  ['PUT', /^\/event\/?$/, 'events.manage'],
+  ['GET', /^\/event\/registrations(\/export)?\/?$/, 'events.view'],
 
   ['GET', /^\/users\/?$/, 'users.view'],
   ['GET', /^\/users\/[^/]+\/?$/, 'users.view'],

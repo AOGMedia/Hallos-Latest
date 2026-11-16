@@ -470,12 +470,17 @@ describe('Input Validation Property Tests', () => {
     
     test('sanitization should preserve safe strings', () => {
       fc.assert(fc.property(
-        fc.string().filter(s => 
-          !s.includes('<') && 
-          !s.includes('>') && 
+        // "Safe" = nothing sanitizeString removes (HTML/JS and SQL markers such as -- and /* */).
+        fc.string().filter(s =>
+          !s.includes('<') &&
+          !s.includes('>') &&
           !s.toLowerCase().includes('javascript:') &&
           !s.toLowerCase().includes('script') &&
-          !s.toLowerCase().includes('on') // Avoid event handlers
+          !s.toLowerCase().includes('on') && // Avoid event handlers
+          !s.includes('--') &&
+          !s.includes('/*') &&
+          !s.includes('*/') &&
+          !/(drop\s+table|delete\s+from|insert\s+into|update\s+set|union\s+select)/i.test(s)
         ),
         (safeString) => {
           const sanitized = validationMiddleware.sanitizeString(safeString);

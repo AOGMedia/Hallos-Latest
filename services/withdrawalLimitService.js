@@ -91,6 +91,18 @@ class WithdrawalLimitService {
     try {
       console.log(`[Withdrawal Limits] Checking limits for user ${userId}: ${amount} ${currency}`);
 
+      // A negative or non-numeric amount is never a valid withdrawal. (The withdrawal
+      // route already refuses these before calling here; this guards other callers.)
+      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount < 0) {
+        return {
+          allowed: false,
+          reason: 'Invalid withdrawal amount',
+          type: 'invalid_amount',
+          limits: null,
+          usage: null
+        };
+      }
+
       // Check if user is suspended
       if (this.suspendedUsers.has(userId)) {
         return {

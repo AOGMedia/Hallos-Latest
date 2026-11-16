@@ -195,21 +195,29 @@ function createRoomPayload(roomId, privileges = {}) {
  * @param {string} role - User role ('host', 'participant', 'audience')
  * @returns {string} ZegoCloud token with room privileges
  */
-function generateTokenWithRoomPrivileges(appId, userId, secret, effectiveTimeInSeconds, roomId, role = 'participant') {
-  // Set privileges based on role
-  const privileges = {
-    loginRoom: 1, // Everyone can login
-    publishStream: (role === 'host' || role === 'participant') ? 1 : 0 // Only hosts and participants can publish
+/**
+ * What each role may do in a room: everyone can log in; only hosts and
+ * participants can publish (go on camera/mic); the audience only watches.
+ * @param {string} role - 'host', 'participant' or 'audience'
+ * @returns {{loginRoom: number, publishStream: number}}
+ */
+function privilegesForRole(role) {
+  return {
+    loginRoom: 1,
+    publishStream: (role === 'host' || role === 'participant') ? 1 : 0
   };
-  
-  const payload = createRoomPayload(roomId, privileges);
-  
+}
+
+function generateTokenWithRoomPrivileges(appId, userId, secret, effectiveTimeInSeconds, roomId, role = 'participant') {
+  const payload = createRoomPayload(roomId, privilegesForRole(role));
+
   return generateToken04(appId, userId, secret, effectiveTimeInSeconds, payload);
 }
 
 module.exports = {
   generateToken04,
   createRoomPayload,
+  privilegesForRole,
   generateTokenWithRoomPrivileges,
   ErrorCode
 };

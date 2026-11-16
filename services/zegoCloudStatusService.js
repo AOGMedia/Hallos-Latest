@@ -141,11 +141,12 @@ class ZegoCloudStatusService {
    * @returns {Object} Duplicate check result
    */
   async checkDuplicateSessions(creatorId, excludeLiveClassId = null) {
-    try {
-      if (!creatorId || typeof creatorId !== 'number') {
-        throw new Error('Creator ID is required and must be a number');
-      }
+    // Validate first, so a bad ID gets this clear message rather than the generic failure below.
+    if (!Number.isInteger(creatorId) || creatorId <= 0) {
+      throw new ZegoCloudError('Creator ID is required and must be a number', 'INVALID_CREATOR_ID', { creatorId });
+    }
 
+    try {
       // Find active live classes for this creator
       const whereClause = {
         userId: creatorId,

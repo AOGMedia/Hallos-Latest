@@ -334,14 +334,18 @@ exports.getSessionById = async (req, res) => {
       }
     }
     
-    // Series with the creator's profile picture (avatarUrl).
-    const seriesJson = session.series ? session.series.toJSON() : null;
-    if (seriesJson && seriesJson.creator) seriesJson.creator = withAvatar(seriesJson.creator);
+    // Series with the creator's profile picture (avatarUrl). Public page: no creator
+    // email, internal fields, room ids or recording unless the viewer may see them.
+    const { isSuperAdmin, creatorFor, sessionFor, seriesFieldsFor } = require('../utils/livePrivacy');
+    let seriesJson = session.series ? session.series.toJSON() : null;
+    if (seriesJson && seriesJson.creator) seriesJson.creator = creatorFor(withAvatar(seriesJson.creator), req.user);
+    if (seriesJson) seriesJson = seriesFieldsFor(seriesJson, req.user);
+    const { series: _series, ...sessionFields } = sessionFor(session, { canSee: hasAccess || isSuperAdmin(req.user) });
 
     return res.json({
       success: true,
       session: {
-        ...session.dataValues,
+        ...sessionFields,
         series: seriesJson,
         hasAccess,
         accessReason,

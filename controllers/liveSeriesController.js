@@ -419,11 +419,13 @@ exports.getSeriesById = async (req, res) => {
       isRegistered = true;
     }
 
+    // Public page: no creator email or internal fields, except for the creator and super admins.
+    const { creatorFor, seriesFieldsFor } = require('../utils/livePrivacy');
     return res.json({
       success: true,
       series: {
-        ...series.dataValues,
-        creator: creatorWithAvatar(series),
+        ...seriesFieldsFor(series.dataValues, req.user),
+        creator: creatorFor(creatorWithAvatar(series), req.user),
         stats,
         hasAccess,
         accessReason,
@@ -468,11 +470,18 @@ exports.getSeriesSessions = async (req, res) => {
     
     // Get sessions
     const sessions = await liveSeriesService.getSeriesSessions(id, filters);
-    
+
+    // Room ids and recordings only for people with access (free, creator, buyers) and super admins.
+    const { isSuperAdmin, sessionFor } = require('../utils/livePrivacy');
+    const canSee =
+      parseFloat(series.price) === 0 ||
+      isSuperAdmin(req.user) ||
+      (req.user ? await liveSeriesService.checkSeriesAccess(req.user.id, series.id) : false);
+
     return res.json({
       success: true,
       count: sessions.length,
-      sessions
+      sessions: sessions.map((session) => sessionFor(session, { canSee }))
     });
     
   } catch (error) {

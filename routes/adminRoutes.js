@@ -278,8 +278,15 @@ router.get('/account-deletions', adminUserController.listAccountDeletions);
 router.post('/account-deletions/:id/complete', require('../middleware/requireSuperAdmin'), userActionLimiter, adminUserController.completeAccountDeletion);
 router.post('/account-deletions/:id/reject', userActionLimiter, adminUserController.rejectAccountDeletion);
 
+// The featured event page (/events): content, price, registration and registrations.
+const adminEventController = require('../controllers/adminEventController');
+router.get('/event', adminEventController.getEvent);
+router.put('/event', userActionLimiter, adminEventController.updateEvent);
+router.get('/event/registrations', adminEventController.listRegistrations);
+router.get('/event/registrations/export', userActionLimiter, adminEventController.exportRegistrations);
+
 // Payout management
-router.get('/payouts', adminDashboardController.getPayouts);
+router.get('/payouts',adminDashboardController.getPayouts);
 router.patch('/payouts/:id/approve', adminDashboardController.approvePayout);
 router.patch('/payouts/:id/reject', adminDashboardController.rejectPayout);
 
