@@ -138,9 +138,18 @@ const GROUPS = [
     label: 'Communities',
     permission: 'communities.view',
     run: async ({ like }) => {
-      const Community = require('../models/Community');
-      const rows = await Community.findAll({ where: { name: { [Op.iLike]: like } }, attributes: ['id', 'name', 'status', 'memberCount'], order: [['createdAt', 'DESC']], limit: PER_GROUP + 1, raw: true });
-      return rows.map((c) => ({ type: 'community', id: String(c.id), title: c.name, subtitle: `${c.memberCount ?? 0} members · ${c.status}`, query: c.name }));
+      // Live member count (the stored member_count column is no longer kept up to date;
+      // communityService counts active members the same way).
+      const rows = await select(
+        `SELECT c.id, c.name, c.status,
+                (SELECT COUNT(*)::int FROM community_members m WHERE m.community_id = c.id AND m.status = 'active') AS members
+           FROM communities c
+          WHERE c.name ILIKE :like
+          ORDER BY c.created_at DESC
+          LIMIT ${PER_GROUP + 1}`,
+        { like }
+      );
+      return rows.map((c) => ({ type: 'community', id: String(c.id), title: c.name, subtitle: `${c.members} member${c.members === 1 ? '' : 's'} · ${c.status}`, query: c.name }));
     },
   },
   {

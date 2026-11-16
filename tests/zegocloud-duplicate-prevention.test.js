@@ -1,6 +1,6 @@
 const fc = require('fast-check');
 const { zegoCloudStatusService } = require('../services/zegoCloudStatusService');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
 
 /**
  * Feature: zegocloud-live-classes, Property 3: Duplicate Session Prevention
@@ -11,7 +11,7 @@ const LiveClass = require('../models/LiveClass');
  */
 
 // Mock dependencies
-jest.mock('../models/LiveClass');
+jest.mock('../models/liveClass');
 
 describe('ZegoCloud Duplicate Session Prevention Properties', () => {
   

@@ -60,7 +60,8 @@ router.get('/:id', optionalAuth, liveSeriesController.getSeriesById);
  * GET /api/live/series/:id/sessions
  * Auth: Optional
  */
-router.get('/:id/sessions', liveSeriesController.getSeriesSessions);
+// Optional sign-in: buyers, the creator and super admins also get room ids and recordings.
+router.get('/:id/sessions', optionalAuth, liveSeriesController.getSeriesSessions);
 
 /**
  * Update series
@@ -122,6 +123,7 @@ router.post('/session/:id/join', authMiddleware, liveSessionController.joinSessi
  * GET /api/live/session/:id
  * Auth: Optional
  */
-router.get('/session/:id', liveSessionController.getSessionById);
+// Optional sign-in, so access (buyer, creator, super admin) is known.
+router.get('/session/:id', optionalAuth, liveSessionController.getSessionById);
 
 module.exports = router;

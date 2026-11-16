@@ -109,11 +109,13 @@ class IdempotencyService {
       };
       
     } catch (error) {
-      await transaction.rollback();
+      // Some branches roll back before throwing; rolling back again would replace
+      // the real error (e.g. IdempotencyConflictError) with "transaction finished".
+      if (!transaction.finished) await transaction.rollback();
       throw error;
     }
   }
-  
+
   /**
    * Store the result of a completed operation
    * @param {string} key - Idempotency key

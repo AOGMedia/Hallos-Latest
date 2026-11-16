@@ -231,10 +231,10 @@ describe('approveJoinRequest', () => {
     require('../../config/db').transaction.mockResolvedValue(t);
   });
 
-  it('sets member status=active and increments memberCount', async () => {
+  // Member counts are counted live (getLiveMemberCount), not stored, so nothing is incremented.
+  it('sets member status=active', async () => {
     const member = makeMember({ status: 'pending' });
     CommunityMember.findOne = jest.fn().mockResolvedValue(member);
-    Community.increment = jest.fn().mockResolvedValue([]);
     User.findByPk = jest.fn().mockResolvedValue({ email: 'a@b.com', firstname: 'A' });
     Community.findByPk = jest.fn().mockResolvedValue(makeCommunity({ status: 'active' }));
 
@@ -244,7 +244,6 @@ describe('approveJoinRequest', () => {
       expect.objectContaining({ status: 'active' }),
       expect.any(Object)
     );
-    expect(Community.increment).toHaveBeenCalledWith('memberCount', expect.any(Object));
   });
 });
 
@@ -292,14 +291,13 @@ describe('removeMember', () => {
     require('../../config/db').transaction.mockResolvedValue(t);
   });
 
-  it('decrements memberCount', async () => {
+  // Member counts are counted live, so removing the membership is all that's needed.
+  it('removes the membership', async () => {
     const member = makeMember();
     CommunityMember.findOne = jest.fn().mockResolvedValue(member);
-    Community.decrement = jest.fn().mockResolvedValue([]);
 
     await communityService.removeMember('comm-uuid', 2, 1);
 
-    expect(Community.decrement).toHaveBeenCalledWith('memberCount', expect.any(Object));
     expect(member.destroy).toHaveBeenCalled();
   });
 });
@@ -307,9 +305,12 @@ describe('removeMember', () => {
 // ── assignModerator / revokeModerator ─────────────────────────────────────────
 
 describe('role transitions', () => {
+  // The first lookup is the person making the change (must be the owner), the second the target.
+  const owner = () => makeMember({ userId: 1, role: 'owner' });
+
   it('assignModerator sets role=moderator', async () => {
     const member = makeMember({ role: 'member' });
-    CommunityMember.findOne = jest.fn().mockResolvedValue(member);
+    CommunityMember.findOne = jest.fn().mockResolvedValueOnce(owner()).mockResolvedValueOnce(member);
 
     await communityService.assignModerator('comm-uuid', 2, 1);
 
@@ -318,11 +319,22 @@ describe('role transitions', () => {
 
   it('revokeModerator sets role=member', async () => {
     const member = makeMember({ role: 'moderator' });
-    CommunityMember.findOne = jest.fn().mockResolvedValue(member);
+    CommunityMember.findOne = jest.fn().mockResolvedValueOnce(owner()).mockResolvedValueOnce(member);
 
     await communityService.revokeModerator('comm-uuid', 2, 1);
 
     expect(member.update).toHaveBeenCalledWith({ role: 'member' });
+  });
+
+  it('only the owner can assign or revoke moderators', async () => {
+    const member = makeMember({ role: 'member' });
+    const notOwner = makeMember({ userId: 3, role: 'moderator' });
+    CommunityMember.findOne = jest.fn().mockResolvedValueOnce(notOwner).mockResolvedValueOnce(member);
+    await expect(communityService.assignModerator('comm-uuid', 2, 3)).rejects.toThrow('Only the owner can assign moderators.');
+
+    CommunityMember.findOne = jest.fn().mockResolvedValueOnce(notOwner).mockResolvedValueOnce(makeMember({ role: 'moderator' }));
+    await expect(communityService.revokeModerator('comm-uuid', 2, 3)).rejects.toThrow('Only the owner can revoke moderators.');
+    expect(member.update).not.toHaveBeenCalled();
   });
 });
 

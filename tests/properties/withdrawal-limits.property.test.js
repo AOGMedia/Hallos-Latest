@@ -36,6 +36,9 @@ describe('Withdrawal Limits Property Tests', () => {
             { minLength: 1, maxLength: 10 }
           ),
           async (userId, currency, withdrawals) => {
+            // Fresh service per run: usage is kept in memory, and fast-check runs this many
+            // times (and replays it while shrinking), so earlier runs' withdrawals would count.
+            withdrawalLimitService = new WithdrawalLimitService();
             // Get user limits
             const limits = await withdrawalLimitService.getUserLimits(userId, currency);
             
@@ -64,6 +67,9 @@ describe('Withdrawal Limits Property Tests', () => {
                 
                 // Verify total doesn't exceed daily limit
                 expect(totalWithdrawn).toBeLessThanOrEqual(limits.daily + 0.01); // Small epsilon for floating point
+              } else if (limitCheck.type === 'single_limit') {
+                // Refused because this one withdrawal is over the single-transaction limit
+                expect(withdrawal.amount).toBeGreaterThan(limits.single);
               } else {
                 // If not allowed, verify it would have exceeded the limit
                 expect(totalWithdrawn + withdrawal.amount).toBeGreaterThan(limits.daily);
@@ -184,6 +190,7 @@ describe('Withdrawal Limits Property Tests', () => {
             { minLength: 1, maxLength: 5 }
           ),
           async (userId, currency, amounts) => {
+            withdrawalLimitService = new WithdrawalLimitService(); // fresh usage per run (see above)
             let expectedTotal = 0;
             
             for (let i = 0; i < amounts.length; i++) {

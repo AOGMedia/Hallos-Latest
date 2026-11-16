@@ -15,7 +15,7 @@ describe('ZegoCloud Participant Management Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          roomId: fc.string({ minLength: 5, maxLength: 50 }),
+          roomId: fc.string({ minLength: 5, maxLength: 50 }).filter(s => s.trim().length > 0), // blank room IDs are rejected
           userId: fc.integer({ min: 1, max: 999999 }),
           role: fc.constantFrom('host', 'participant', 'audience'),
           userInfo: fc.record({
@@ -70,7 +70,7 @@ describe('ZegoCloud Participant Management Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          roomId: fc.string({ minLength: 5, maxLength: 50 }),
+          roomId: fc.string({ minLength: 5, maxLength: 50 }).filter(s => s.trim().length > 0), // blank room IDs are rejected
           userId: fc.integer({ min: 1, max: 999999 }),
           reason: fc.option(fc.constantFrom('kicked', 'left', 'timeout', 'banned'))
         }),
@@ -160,8 +160,8 @@ describe('ZegoCloud Participant Management Properties', () => {
           const hasValidUserId = invalidData.userId && 
                                typeof invalidData.userId === 'number' && 
                                invalidData.userId > 0;
-          const hasValidRole = invalidData.role && 
-                             ['host', 'participant', 'audience'].includes(invalidData.role);
+          // A missing role is sent as 'participant' below, so only a wrong role is invalid.
+          const hasValidRole = ['host', 'participant', 'audience'].includes(invalidData.role || 'participant');
 
           if (!hasValidRoomId || !hasValidUserId || !hasValidRole) {
             // Should throw ZegoCloudError for invalid inputs
@@ -175,9 +175,9 @@ describe('ZegoCloud Participant Management Properties', () => {
           } else {
             // Should succeed with valid inputs
             const result = await zegoCloudService.addParticipant(
-              invalidData.roomId, 
-              invalidData.userId, 
-              invalidData.role
+              invalidData.roomId,
+              invalidData.userId,
+              invalidData.role || 'participant'
             );
             expect(result.success).toBe(true);
           }
@@ -191,7 +191,7 @@ describe('ZegoCloud Participant Management Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          roomId: fc.string({ minLength: 5, maxLength: 50 }),
+          roomId: fc.string({ minLength: 5, maxLength: 50 }).filter(s => s.trim().length > 0), // blank room IDs are rejected
           userId: fc.integer({ min: 1, max: 999999 }),
           role: fc.constantFrom('host', 'participant', 'audience')
         }),
@@ -205,14 +205,12 @@ describe('ZegoCloud Participant Management Properties', () => {
           // Verify role is correctly assigned
           expect(result.role).toBe(participantData.role);
 
-          // Verify token contains correct role information
-          const tokenParts = result.token.split('.');
-          expect(tokenParts).toHaveLength(3);
-
-          const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64url').toString());
-          expect(payload.role).toBe(participantData.role);
-          expect(payload.user_id).toBe(participantData.userId.toString());
-          expect(payload.room_id).toBe(participantData.roomId);
+          // The token is ZegoCloud's official encrypted token04 (not a JWT, so it can't be
+          // decoded here); the role's privileges are covered in zegocloud-room-creation.test.js.
+          expect(result.token.startsWith('04')).toBe(true);
+          expect(result.token.length).toBeGreaterThan(100);
+          expect(result.userId).toBe(participantData.userId);
+          expect(result.roomId).toBe(participantData.roomId);
         }
       ),
       { numRuns: 100 }
@@ -223,7 +221,7 @@ describe('ZegoCloud Participant Management Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          roomId: fc.string({ minLength: 5, maxLength: 50 }),
+          roomId: fc.string({ minLength: 5, maxLength: 50 }).filter(s => s.trim().length > 0), // blank room IDs are rejected
           userId: fc.integer({ min: 1, max: 999999 }),
           userInfo: fc.option(fc.record({
             displayName: fc.option(fc.string({ minLength: 1, maxLength: 50 })),
@@ -268,7 +266,7 @@ describe('ZegoCloud Participant Management Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          roomId: fc.string({ minLength: 5, maxLength: 50 }),
+          roomId: fc.string({ minLength: 5, maxLength: 50 }).filter(s => s.trim().length > 0), // blank room IDs are rejected
           participants: fc.array(
             fc.record({
               userId: fc.integer({ min: 1, max: 999999 }),

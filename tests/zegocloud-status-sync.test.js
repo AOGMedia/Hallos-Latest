@@ -1,6 +1,6 @@
 const fc = require('fast-check');
 const { zegoCloudStatusService } = require('../services/zegoCloudStatusService');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
 
 /**
  * Feature: zegocloud-live-classes, Property 2: Database Status Synchronization
@@ -11,7 +11,7 @@ const LiveClass = require('../models/LiveClass');
  */
 
 // Mock dependencies
-jest.mock('../models/LiveClass');
+jest.mock('../models/liveClass');
 
 describe('ZegoCloud Status Synchronization Properties', () => {
   
@@ -186,17 +186,10 @@ describe('ZegoCloud Status Synchronization Properties', () => {
 
           LiveClass.findAll.mockResolvedValue(staleRooms);
 
-          // Mock individual live class updates
-          staleRooms.forEach(room => {
-            const mockLiveClass = {
-              ...room,
-              update: jest.fn().mockResolvedValue(true)
-            };
-            LiveClass.findByPk.mockImplementation((id) => {
-              if (id === room.id) return Promise.resolve(mockLiveClass);
-              return Promise.resolve(null);
-            });
-          });
+          // Mock individual live class updates (one lookup that knows every room; setting the
+          // mock inside the loop used to replace it each time, so only the last room was found)
+          const byId = new Map(staleRooms.map(room => [room.id, { ...room, update: jest.fn().mockResolvedValue(true) }]));
+          LiveClass.findByPk.mockImplementation((id) => Promise.resolve(byId.get(id) || null));
 
           // Test cleanup
           const cleanupResult = await zegoCloudStatusService.cleanupInactiveRooms(testData.maxAgeHours);
@@ -269,19 +262,14 @@ describe('ZegoCloud Status Synchronization Properties', () => {
           { minLength: 1, maxLength: 5 }
         ),
         async (updates) => {
-          // Mock live classes for each update
-          updates.forEach(update => {
-            const mockLiveClass = {
-              id: update.liveClassId,
-              userId: update.userId,
-              status: 'scheduled',
-              update: jest.fn().mockResolvedValue(true)
-            };
-            LiveClass.findByPk.mockImplementation((id) => {
-              if (id === update.liveClassId) return Promise.resolve(mockLiveClass);
-              return Promise.resolve(null);
-            });
-          });
+          // Mock live classes for each update (one lookup that knows them all)
+          const byId = new Map(updates.map(update => [update.liveClassId, {
+            id: update.liveClassId,
+            userId: update.userId,
+            status: 'scheduled',
+            update: jest.fn().mockResolvedValue(true)
+          }]));
+          LiveClass.findByPk.mockImplementation((id) => Promise.resolve(byId.get(id) || null));
 
           // Test batch update
           const batchResult = await zegoCloudStatusService.batchUpdateStatuses(updates);
@@ -315,6 +303,7 @@ describe('ZegoCloud Status Synchronization Properties', () => {
           status: fc.constantFrom('live', 'ended')
         }),
         async (testData) => {
+          fc.pre(testData.validLiveClassId !== testData.invalidLiveClassId);
           // Mock valid live class
           const mockValidLiveClass = {
             id: testData.validLiveClassId,
@@ -329,9 +318,10 @@ describe('ZegoCloud Status Synchronization Properties', () => {
           });
 
           // Test error handling for invalid live class
+          // The service wraps errors: the reason is in details.error.
           await expect(
             zegoCloudStatusService.updateLiveClassStatus(testData.invalidLiveClassId, testData.status)
-          ).rejects.toThrow('Live class not found');
+          ).rejects.toMatchObject({ code: 'STATUS_UPDATE_FAILED', details: expect.objectContaining({ error: 'Live class not found' }) });
 
           // Verify valid operations still work after errors
           const validResult = await zegoCloudStatusService.updateLiveClassStatus(

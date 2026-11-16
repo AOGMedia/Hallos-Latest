@@ -16,7 +16,7 @@ const AMOUNT_LIMITS = {
   },
   USD: {
     min: 100, // $1.00 minimum (in cents)
-    max: 100000, // $100,000.00 maximum (in cents)
+    max: 10000000, // $100,000.00 maximum (in cents; was 100000 = $1,000, a factor of 100 off)
     precision: 2
   }
 };

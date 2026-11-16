@@ -1,6 +1,8 @@
 const fc = require('fast-check');
 const sequelize = require('../config/db');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
+// Writes to a real database: runs only against a test one (see tests/helpers/dbTestGuard.js).
+const { describeWithDb } = require('./helpers/dbTestGuard');
 
 /**
  * Feature: zegocloud-live-classes, Property 9: Mux Functionality Preservation
@@ -10,7 +12,7 @@ const LiveClass = require('../models/LiveClass');
  * all existing Mux functionality remains intact and accessible.
  */
 
-describe('ZegoCloud Database Migration Safety', () => {
+describeWithDb('ZegoCloud Database Migration Safety', () => {
   let testUserId;
 
   beforeAll(async () => {
@@ -44,10 +46,10 @@ describe('ZegoCloud Database Migration Safety', () => {
         fc.record({
           title: fc.string({ minLength: 1, maxLength: 50 }),
           description: fc.option(fc.string({ maxLength: 200 })),
-          price: fc.float({ min: 0, max: 1000 }),
+          price: fc.float({ min: 0, max: 1000, noNaN: true }),
           thumbnailUrl: fc.option(fc.webUrl()),
-          startTime: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-01-01') }),
-          endTime: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-01-01') }),
+          startTime: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-01-01'), noInvalidDate: true }),
+          endTime: fc.date({ min: new Date('2020-01-01'), max: new Date('2030-01-01'), noInvalidDate: true }),
           privacy: fc.constantFrom('public', 'private'),
           status: fc.constantFrom('scheduled', 'live', 'ended', 'recorded'),
           // Existing Mux fields that must remain functional
@@ -58,6 +60,14 @@ describe('ZegoCloud Database Migration Safety', () => {
           recording_asset_id: fc.option(fc.string({ minLength: 1, maxLength: 50 }))
         }),
         async (liveClassData) => {
+          // The model requires a stream ID for a live Mux class: check that rule, then skip.
+          if (liveClassData.status === 'live' && !liveClassData.mux_stream_id) {
+            await expect(
+              LiveClass.create({ userId: testUserId, ...liveClassData, streaming_provider: 'mux' })
+            ).rejects.toThrow('Mux stream ID is required for live classes using Mux');
+            return;
+          }
+
           // Test that we can create a live class with Mux fields
           const createdClass = await LiveClass.create({
             userId: testUserId,
@@ -100,7 +110,7 @@ describe('ZegoCloud Database Migration Safety', () => {
       fc.asyncProperty(
         fc.record({
           title: fc.string({ minLength: 1, maxLength: 100 }),
-          price: fc.float({ min: 0, max: 1000 }),
+          price: fc.float({ min: 0, max: 1000, noNaN: true }),
           mux_stream_id: fc.string({ minLength: 1 }),
           mux_playback_id: fc.string({ minLength: 1 })
         }),
@@ -110,10 +120,10 @@ describe('ZegoCloud Database Migration Safety', () => {
             userId: testUserId,
             ...muxData,
             streaming_provider: 'mux',
-            // Explicitly leave ZegoCloud fields null
+            // Explicitly leave ZegoCloud fields null (zego_room_token no longer exists:
+            // tokens are generated per request and never stored)
             zego_room_id: null,
             zego_app_id: null,
-            zego_room_token: null,
             max_participants: null
           });
 
@@ -125,7 +135,7 @@ describe('ZegoCloud Database Migration Safety', () => {
           // Verify ZegoCloud fields are null and don't interfere
           expect(muxClass.zego_room_id).toBeNull();
           expect(muxClass.zego_app_id).toBeNull();
-          expect(muxClass.zego_room_token).toBeNull();
+          expect(muxClass.zego_room_token).toBeUndefined(); // not stored any more
           expect(muxClass.max_participants).toBeNull();
 
           // Verify we can query by streaming provider
@@ -166,9 +176,9 @@ describe('ZegoCloud Database Migration Safety', () => {
       'mux_playback_id', 'recording_asset_id'
     ];
     
+    // (zego_room_token was removed on purpose: tokens are generated per request)
     const expectedZegoFields = [
-      'zego_room_id', 'zego_app_id', 'streaming_provider',
-      'zego_room_token', 'max_participants'
+      'zego_room_id', 'zego_app_id', 'streaming_provider', 'max_participants'
     ];
 
     expectedMuxFields.forEach(field => {

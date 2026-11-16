@@ -1,6 +1,6 @@
 const fc = require('fast-check');
 const { zegoCloudService } = require('../services/zegoCloudService');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
 
 /**
  * Feature: zegocloud-live-classes, Property 10: System Isolation
@@ -11,7 +11,7 @@ const LiveClass = require('../models/LiveClass');
  */
 
 // Mock dependencies
-jest.mock('../models/LiveClass');
+jest.mock('../models/liveClass');
 
 describe('ZegoCloud System Integration Properties', () => {
   
@@ -23,7 +23,7 @@ describe('ZegoCloud System Integration Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          liveClassId: fc.string({ minLength: 1, maxLength: 50 }),
+          liveClassId: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
           creatorId: fc.integer({ min: 1, max: 999999 }),
           maxParticipants: fc.option(fc.integer({ min: 1, max: 1000 })),
           privacy: fc.constantFrom('public', 'private')
@@ -76,7 +76,7 @@ describe('ZegoCloud System Integration Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          liveClassId: fc.string({ minLength: 1, maxLength: 50 }),
+          liveClassId: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
           creatorId: fc.integer({ min: 1, max: 999999 }),
           failureType: fc.constantFrom('room_creation', 'token_generation', 'participant_management')
         }),
@@ -186,7 +186,7 @@ describe('ZegoCloud System Integration Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          validLiveClassId: fc.string({ minLength: 1, maxLength: 50 }),
+          validLiveClassId: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
           invalidLiveClassId: fc.constantFrom('', null, undefined),
           validCreatorId: fc.integer({ min: 1, max: 999999 }),
           invalidCreatorId: fc.constantFrom(0, -1, null, undefined)
@@ -226,7 +226,7 @@ describe('ZegoCloud System Integration Properties', () => {
       fc.asyncProperty(
         fc.array(
           fc.record({
-            liveClassId: fc.string({ minLength: 1, maxLength: 50 }),
+            liveClassId: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
             creatorId: fc.integer({ min: 1, max: 999999 })
           }),
           { minLength: 2, maxLength: 5 }
@@ -272,7 +272,7 @@ describe('ZegoCloud System Integration Properties', () => {
     await fc.assert(
       fc.asyncProperty(
         fc.record({
-          liveClassId: fc.string({ minLength: 1, maxLength: 50 }),
+          liveClassId: fc.string({ minLength: 1, maxLength: 50 }).filter(s => s.trim().length > 0),
           creatorId: fc.integer({ min: 1, max: 999999 }),
           participantId: fc.integer({ min: 1000, max: 999999 })
         }),

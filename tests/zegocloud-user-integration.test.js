@@ -1,7 +1,12 @@
 const fc = require('fast-check');
 const { zegoCloudService } = require('../services/zegoCloudService');
 const User = require('../models/User');
-const LiveClass = require('../models/LiveClass');
+const LiveClass = require('../models/liveClass');
+const { privilegesForRole } = require('../utils/zegoServerAssistant');
+
+// Tokens are ZegoCloud's official encrypted "token04" (not JWTs): "04" + base64.
+const isZegoToken = (token) =>
+  typeof token === 'string' && token.startsWith('04') && token.length > 100 && /^[A-Za-z0-9+/]+=*$/.test(token.slice(2));
 
 /**
  * Feature: zegocloud-live-classes, Property 12: User Data Integration
@@ -13,7 +18,7 @@ const LiveClass = require('../models/LiveClass');
 
 // Mock dependencies
 jest.mock('../models/User');
-jest.mock('../models/LiveClass');
+jest.mock('../models/liveClass');
 
 describe('ZegoCloud User Data Integration Properties', () => {
   
@@ -29,7 +34,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
           firstname: fc.string({ minLength: 1, maxLength: 50 }),
           lastname: fc.string({ minLength: 1, maxLength: 50 }),
           email: fc.emailAddress(),
-          roomId: fc.string({ minLength: 10, maxLength: 50 }),
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0),
           role: fc.constantFrom('host', 'participant', 'audience')
         }),
         async (userData) => {
@@ -69,8 +74,8 @@ describe('ZegoCloud User Data Integration Properties', () => {
           expect(participantResult.userInfo.email).toBe(mockUser.email);
           expect(participantResult.token).toBeDefined();
 
-          // Verify token contains user information
-          expect(participantResult.token).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+          // Official ZegoCloud token04 (encrypted, not a JWT)
+          expect(isZegoToken(participantResult.token)).toBe(true);
         }
       ),
       { numRuns: 100 }
@@ -82,7 +87,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
       fc.asyncProperty(
         fc.record({
           userId: fc.integer({ min: 1, max: 999999 }),
-          roomId: fc.string({ minLength: 10, maxLength: 50 }),
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0),
           role: fc.constantFrom('host', 'participant', 'audience')
         }),
         async (userData) => {
@@ -115,7 +120,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
       fc.asyncProperty(
         fc.record({
           userId: fc.integer({ min: 1, max: 999999 }),
-          roomId: fc.string({ minLength: 10, maxLength: 50 }),
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0),
           role: fc.constantFrom('host', 'participant', 'audience')
         }),
         async (userData) => {
@@ -128,36 +133,14 @@ describe('ZegoCloud User Data Integration Properties', () => {
           expect(participantResult.success).toBe(true);
           expect(participantResult.role).toBe(userData.role);
 
-          // Verify token contains correct role information
-          const token = participantResult.token;
-          expect(token).toBeDefined();
-          
-          // Decode token payload (simplified check)
-          const tokenParts = token.split('.');
-          expect(tokenParts).toHaveLength(3);
-          
-          const payload = JSON.parse(Buffer.from(tokenParts[1], 'base64url').toString());
-          expect(payload.role).toBe(userData.role);
-          expect(payload.user_id).toBe(userData.userId.toString());
-          expect(payload.room_id).toBe(userData.roomId);
+          // A real (encrypted) ZegoCloud token is issued for the role
+          expect(isZegoToken(participantResult.token)).toBe(true);
 
-          // Verify role privileges
-          const expectedPrivileges = zegoCloudService.getRolePrivileges(userData.role);
-          expect(payload.privilege).toEqual(expectedPrivileges);
-
-          if (userData.role === 'host') {
-            expect(payload.privilege.canPublish).toBe(true);
-            expect(payload.privilege.canKickOut).toBe(true);
-            expect(payload.privilege.canManageRoom).toBe(true);
-          } else if (userData.role === 'participant') {
-            expect(payload.privilege.canPublish).toBe(true);
-            expect(payload.privilege.canKickOut).toBe(false);
-            expect(payload.privilege.canManageRoom).toBe(false);
-          } else if (userData.role === 'audience') {
-            expect(payload.privilege.canPublish).toBe(false);
-            expect(payload.privilege.canKickOut).toBe(false);
-            expect(payload.privilege.canManageRoom).toBe(false);
-          }
+          // What the token grants for this role: everyone logs in; hosts and
+          // participants can publish; the audience only watches.
+          const privileges = privilegesForRole(userData.role);
+          expect(privileges.loginRoom).toBe(1);
+          expect(privileges.publishStream).toBe(userData.role === 'audience' ? 0 : 1);
         }
       ),
       { numRuns: 100 }
@@ -172,7 +155,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
           firstname: fc.string({ minLength: 1, maxLength: 30 }).filter(s => s.trim().length > 0),
           lastname: fc.string({ minLength: 1, maxLength: 30 }).filter(s => s.trim().length > 0),
           email: fc.emailAddress(),
-          roomId: fc.string({ minLength: 10, maxLength: 50 })
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0)
         }),
         async (userData) => {
           // Mock user with various name formats
@@ -219,7 +202,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
           creatorId: fc.integer({ min: 1, max: 999999 }),
           participantId: fc.integer({ min: 1000000, max: 9999999 }),
           liveClassId: fc.uuid(),
-          roomId: fc.string({ minLength: 10, maxLength: 50 })
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0)
         }),
         async (testData) => {
           // Mock live class with creator
@@ -287,15 +270,11 @@ describe('ZegoCloud User Data Integration Properties', () => {
           expect(participantResult.role).toBe('participant');
           expect(participantResult.userInfo.displayName).toBe('Participant User');
 
-          // Verify different privileges
-          const creatorToken = creatorResult.token;
-          const participantToken = participantResult.token;
-
-          const creatorPayload = JSON.parse(Buffer.from(creatorToken.split('.')[1], 'base64url').toString());
-          const participantPayload = JSON.parse(Buffer.from(participantToken.split('.')[1], 'base64url').toString());
-
-          expect(creatorPayload.privilege.canManageRoom).toBe(true);
-          expect(participantPayload.privilege.canManageRoom).toBe(false);
+          // Each gets their own real token. (Room management - kicking, muting - is decided by
+          // the creator's role in the app, not by token privileges, which only cover login/publish.)
+          expect(isZegoToken(creatorResult.token)).toBe(true);
+          expect(isZegoToken(participantResult.token)).toBe(true);
+          expect(creatorResult.token).not.toBe(participantResult.token);
         }
       ),
       { numRuns: 50 }
@@ -308,7 +287,7 @@ describe('ZegoCloud User Data Integration Properties', () => {
         fc.record({
           userId: fc.integer({ min: 1, max: 999999 }),
           email: fc.option(fc.emailAddress()),
-          roomId: fc.string({ minLength: 10, maxLength: 50 }),
+          roomId: fc.string({ minLength: 10, maxLength: 50 }).filter(s => s.trim().length > 0),
           includeEmail: fc.boolean()
         }),
         async (userData) => {
