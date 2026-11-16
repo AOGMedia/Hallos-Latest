@@ -1,8 +1,12 @@
 const { paystackClient } = require('../config/paystack');
 const CampaignRegistration = require('../models/CampaignRegistration');
 
-const CAMPAIGN_AMOUNT_NGN = 3000;        // ₦3,000
-const CAMPAIGN_AMOUNT_KOBO = 300000;     // in kobo
+const featuredEvent = require('../services/featuredEventService');
+
+// The price and whether registration is open are set from the admin (Event page);
+// featuredEventService falls back to ₦3,000 and open if nothing is set or the
+// settings can't be read. Each registration stores the amount it was charged,
+// so changing the price never affects someone already mid-payment.
 
 /**
  * Register for the Hallos Fastrack Retreat campaign
@@ -23,6 +27,15 @@ exports.registerForCampaign = async (req, res) => {
       jobDescription,
       whatToLearn
     } = req.body;
+
+    if (!(await featuredEvent.isRegistrationOpen())) {
+      return res.status(403).json({
+        success: false,
+        message: 'Registration for this event is closed.',
+        registrationClosed: true
+      });
+    }
+    const amountNgn = await featuredEvent.priceNgn();
 
     // Validate required fields
     const missing = [];
@@ -75,14 +88,14 @@ exports.registerForCampaign = async (req, res) => {
       paymentReference: reference,
       paymentStatus: 'pending',
       paymentGateway: 'paystack',
-      amount: CAMPAIGN_AMOUNT_NGN,
+      amount: amountNgn,
       currency: 'NGN'
     });
 
     // Initialize Paystack transaction
     const paystackResponse = await paystackClient.post('/transaction/initialize', {
       email: registration.email,
-      amount: CAMPAIGN_AMOUNT_KOBO,
+      amount: amountNgn * 100, // kobo
       currency: 'NGN',
       reference,
       callback_url: `${process.env.CLIENT_URL}/campaign/success`,

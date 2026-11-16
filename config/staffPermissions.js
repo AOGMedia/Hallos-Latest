@@ -143,6 +143,14 @@ const PERMISSION_GROUPS = [
     ],
   },
   {
+    key: 'events',
+    label: 'Event page',
+    permissions: [
+      { code: 'events.view', label: 'See the event page settings and registrations' },
+      { code: 'events.manage', label: 'Edit the event page, price and registration', risky: true },
+    ],
+  },
+  {
     key: 'feedback',
     label: 'Feedback',
     permissions: [

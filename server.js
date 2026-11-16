@@ -60,6 +60,7 @@ const { ensureUserActivity } = require('./utils/ensureUserActivity');
 const { ensureAnnouncements } = require('./utils/ensureAnnouncements');
 const { ensureAccountDeletion } = require('./utils/ensureAccountDeletion');
 const { ensureStaffAlerts } = require('./utils/ensureStaffAlerts');
+const { ensureFeaturedEvent } = require('./utils/ensureFeaturedEvent');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -213,6 +214,7 @@ app.use('/api/admin/communities', adminCommunityRoutes);
 // The admin's one search box (passes through /api/admin as a delegated path).
 app.use('/api/admin/search', require('./routes/adminSearchRoutes'));
 app.use('/api/campaigns', campaignRoutes);
+app.use('/api/events', require('./routes/eventRoutes'));
 app.use('/api/blog', blogRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
@@ -273,6 +275,8 @@ sequelize.sync({ force: false })
   .then(() => ensureAccountDeletion())
   // Same: without it no staff alert emails are sent.
   .then(() => ensureStaffAlerts())
+  // Same: without it the events page shows its built-in content and price.
+  .then(() => ensureFeaturedEvent())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
