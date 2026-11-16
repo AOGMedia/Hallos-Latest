@@ -1867,3 +1867,68 @@ exports.sendSaleRefundedEmail = async (to, creatorName, contentTitle, amountTake
     html,
   });
 };
+
+const SCHEDULE_DAY_ORDER = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+
+/** ['wednesday', 'monday'] -> "Mondays and Wednesdays". */
+const formatScheduleDays = (days = []) => {
+  const names = SCHEDULE_DAY_ORDER
+    .filter((d) => days.map((x) => String(x).toLowerCase()).includes(d))
+    .map((d) => `${d[0].toUpperCase()}${d.slice(1)}s`);
+  if (names.length <= 1) return names.join('');
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+};
+
+/**
+ * To someone enrolled in a live series: the creator changed the days, the time
+ * or the start date. Sessions are stored as UTC moments, so times are shown in
+ * UTC here (the class page shows them in the reader's own time zone).
+ */
+exports.sendSeriesScheduleChangedEmail = async (to, firstname, details) => {
+  const { seriesId, seriesTitle, days, nextSessionStart, nextSessionNumber } = details;
+  const title = escapeHtml(seriesTitle || 'your live series');
+  const seriesUrl = `${process.env.CLIENT_URL}/series/${encodeURIComponent(seriesId)}`;
+
+  const next = nextSessionStart ? new Date(nextSessionStart) : null;
+  const nextDate = next
+    ? next.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })
+    : null;
+  const nextTime = next
+    ? next.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
+    : null;
+  const dayText = formatScheduleDays(days);
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f1f1f;">
+      <h2 style="margin: 0 0 12px;">Your class schedule has changed</h2>
+      <p>Hi ${escapeHtml(firstname || 'there')},</p>
+      <p>The creator of <strong>${title}</strong> has updated when the live sessions happen.</p>
+
+      <div style="background: #f4f2fd; padding: 16px 20px; border-radius: 10px; margin: 20px 0; border-left: 4px solid #6a57e5;">
+        ${dayText ? `<p style="margin: 4px 0;"><strong>Days:</strong> ${escapeHtml(dayText)}</p>` : ''}
+        ${next ? `<p style="margin: 4px 0;"><strong>Next session${nextSessionNumber ? ` (${Number(nextSessionNumber)})` : ''}:</strong> ${nextDate}, ${nextTime} UTC</p>` : ''}
+      </div>
+
+      <p>
+        Your access hasn't changed and links you've saved still work. The class page shows
+        every session in your own time zone.
+      </p>
+
+      <div style="text-align: center; margin: 28px 0;">
+        <a href="${seriesUrl}" style="background: #6a57e5; color: #ffffff; padding: 12px 24px; border-radius: 999px; text-decoration: none; font-weight: bold; display: inline-block;">
+          See the new schedule
+        </a>
+      </div>
+
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `Schedule update: ${String(seriesTitle || 'your live series').slice(0, 120)}`,
+    html,
+  });
+};

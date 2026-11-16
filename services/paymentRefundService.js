@@ -59,24 +59,50 @@ const nameOf = (row) => [row?.firstname, row?.lastname].filter(Boolean).join(' '
 // --- Reading payments -----------------------------------------------------------
 
 /**
- * Every paid sale, from both places sales are recorded: purchases, and
- * freebie_access rows from the direct freebie checkout that have no purchase.
+ * Every paid sale, from the places sales are recorded: purchases,
+ * freebie_access rows from the direct freebie checkout that have no purchase,
+ * and event registrations (the /events page), whose name and email come from
+ * the registration form.
  */
-const PAYMENTS_CTE = `
-  WITH payments AS (
+const PURCHASES_AND_FREEBIES = `
     SELECT 'purchase'::text AS source, p.id::text AS id, p.payment_reference AS reference,
            p.user_id AS buyer_id, p.content_type::text AS content_type, p.content_id::text AS content_id,
            p.amount, p.currency, p.payment_gateway::text AS gateway, p.payment_status::text AS status,
-           p.created_at
+           p.created_at, NULL::text AS buyer_name, NULL::text AS buyer_email
       FROM purchases p
     UNION ALL
     SELECT 'freebie', fa.id::text, fa.purchase_reference, fa.user_id, 'freebie', fa.freebie_id::text,
            fa.amount_paid, fa.currency, CASE WHEN fa.currency = 'USD' THEN 'stripe' ELSE 'paystack' END,
-           'completed', fa.created_at
+           'completed', fa.created_at, NULL, NULL
       FROM freebie_access fa
      WHERE fa.purchase_reference IS NOT NULL AND fa.amount_paid > 0
-       AND NOT EXISTS (SELECT 1 FROM purchases p2 WHERE p2.payment_reference = fa.purchase_reference)
-  )`;
+       AND NOT EXISTS (SELECT 1 FROM purchases p2 WHERE p2.payment_reference = fa.purchase_reference)`;
+// The account that registered: stored on newer rows, matched by email for older ones.
+const eventBuyerId = () =>
+  `${require('../utils/ensureFeaturedEvent').isRegistrationUserReady() ? 'cr.user_id' : 'NULL::int'}`;
+const EVENT_REGISTRATIONS = () => `
+    UNION ALL
+    SELECT 'event', cr.id::text, cr.payment_reference,
+           COALESCE(${eventBuyerId()}, (SELECT u.id FROM "Users" u WHERE u.email = cr.email LIMIT 1)), 'event', NULL::text,
+           cr.amount, cr.currency, COALESCE(cr.payment_gateway, 'paystack'), cr.payment_status::text,
+           cr.created_at, NULLIF(TRIM(CONCAT(cr.first_name, ' ', cr.last_name)), ''), cr.email
+      FROM campaign_registrations cr
+     WHERE cr.payment_reference IS NOT NULL`;
+
+// Checked once per process: if the event table were ever missing, the list
+// still works without it instead of failing.
+let hasEventTable = null;
+async function paymentsCte() {
+  if (hasEventTable === null) {
+    try {
+      const [row] = await query(`SELECT to_regclass('public.campaign_registrations') IS NOT NULL AS present`);
+      hasEventTable = Boolean(row?.present);
+    } catch {
+      return `WITH payments AS (${PURCHASES_AND_FREEBIES})`; // try again next time
+    }
+  }
+  return `WITH payments AS (${PURCHASES_AND_FREEBIES}${hasEventTable ? EVENT_REGISTRATIONS() : ''})`;
+}
 
 /** Title and owner of each sold item, in one query per type. */
 async function describeContent(items, transaction) {
@@ -109,12 +135,16 @@ async function usersById(userIds, transaction) {
 }
 
 function shapePayment(row, content, buyer, refund, isTest = false) {
+  const isEvent = row.source === 'event';
   return {
     isTest,
     source: row.source,
     id: row.id,
     reference: row.reference,
-    buyer: { id: Number(row.buyer_id), name: nameOf(buyer), email: buyer?.email ?? null },
+    // Event payments: the name and email they gave on the form, plus their account if known.
+    buyer: isEvent
+      ? { id: row.buyer_id ? Number(row.buyer_id) : null, name: row.buyer_name ?? nameOf(buyer), email: row.buyer_email ?? null }
+      : { id: Number(row.buyer_id), name: nameOf(buyer), email: buyer?.email ?? null },
     content: { type: row.content_type, id: row.content_id, title: content?.title ?? null },
     amount: Number(row.amount),
     currency: row.currency,
@@ -139,12 +169,14 @@ async function listPayments({ status, currency, search, page = 1, limit = 20 }) 
   const term = String(search || '').trim().slice(0, 100);
   if (term) {
     where.push(`(pay.reference ILIKE :term OR u.email ILIKE :term
-                 OR (COALESCE(u.firstname, '') || ' ' || COALESCE(u.lastname, '')) ILIKE :term)`);
+                 OR (COALESCE(u.firstname, '') || ' ' || COALESCE(u.lastname, '')) ILIKE :term
+                 OR pay.buyer_email ILIKE :term OR pay.buyer_name ILIKE :term)`);
     replacements.term = `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
   }
   const filter = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const size = Math.min(Math.max(Number(limit) || 20, 1), 100);
   const current = Math.max(Number(page) || 1, 1);
+  const PAYMENTS_CTE = await paymentsCte();
 
   const rows = await query(
     `${PAYMENTS_CTE}

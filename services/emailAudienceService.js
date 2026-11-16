@@ -24,14 +24,23 @@ const cleanUserIds = (value, max) =>
 
 const cleanTriState = (value) => (value === 'yes' || value === 'no' ? value : null);
 
+const EVENT_PAYMENTS = ['paid', 'unpaid', 'all'];
+const SIMPLE_EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const cleanEmails = (value, max) =>
+  uniq((Array.isArray(value) ? value : []).map((v) => String(v).trim().toLowerCase()).filter((v) => v.length <= 255 && SIMPLE_EMAIL.test(v))).slice(0, max);
+
 /** Normalises whatever the client sent into the only shape the query builder accepts. */
 const normalizeAudience = (raw = {}) => {
   const filters = raw.filters || {};
   const signup = filters.signup || {};
   const preset = SIGNUP_PRESETS.includes(signup.preset) ? signup.preset : null;
+  const event = raw.event || {};
 
   return {
-    mode: raw.mode === 'selected' ? 'selected' : 'filters',
+    // 'event': people who registered on the events page (they may have no account).
+    mode: raw.mode === 'selected' || raw.mode === 'event' ? raw.mode : 'filters',
+    event: { payment: EVENT_PAYMENTS.includes(event.payment) ? event.payment : 'paid' },
+    excludeEmails: cleanEmails(raw.excludeEmails, MAX_PICKED_USERS),
     filters: {
       signup: {
         preset,
@@ -152,7 +161,44 @@ const buildWhere = (rawAudience, now = new Date()) => {
 const query = (sql, replacements) =>
   sequelize.query(sql, { replacements, type: sequelize.QueryTypes.SELECT });
 
+/**
+ * Event registrants, one row per email (their newest registration), from the
+ * events page form. "Paid" = has a completed payment; "not paid yet" = has
+ * registered but never completed one. Unsubscribed addresses are left out.
+ */
+const eventAudienceSql = (audience, search) => {
+  const where = ['r.email ~ :emailPattern', 'NOT EXISTS (SELECT 1 FROM email_suppressions s WHERE s.email = lower(r.email))'];
+  const replacements = { emailPattern: EMAIL_PATTERN };
+  const paid = "EXISTS (SELECT 1 FROM campaign_registrations p WHERE lower(p.email) = lower(r.email) AND p.payment_status = 'completed')";
+  if (audience.event.payment === 'paid') where.push(paid);
+  if (audience.event.payment === 'unpaid') where.push(`NOT ${paid}`);
+  if (audience.excludeEmails.length) {
+    where.push('lower(r.email) NOT IN (:excludeEmails)');
+    replacements.excludeEmails = audience.excludeEmails;
+  }
+  const term = String(search || '').trim().slice(0, 100);
+  if (term) {
+    where.push('(r.email ILIKE :search OR r.first_name ILIKE :search OR r.last_name ILIKE :search)');
+    replacements.search = `%${term.replace(/[%_\\]/g, '\\$&')}%`;
+  }
+  // Their account: stored on newer registrations, matched by email for older ones.
+  const linked = require('../utils/ensureFeaturedEvent').isRegistrationUserReady() ? 'r.user_id' : 'NULL::int';
+  const sql = `SELECT DISTINCT ON (lower(r.email))
+                      COALESCE(${linked}, (SELECT u.id FROM "Users" u WHERE u.email = r.email LIMIT 1)) AS id,
+                      r.first_name AS "firstName", r.last_name AS "lastName",
+                      lower(r.email) AS email, r.created_at AS "createdAt"
+                 FROM campaign_registrations r WHERE ${where.join(' AND ')}
+                ORDER BY lower(r.email), r.created_at DESC`;
+  return { sql, replacements };
+};
+
 const countAudience = async (rawAudience) => {
+  const normalized = normalizeAudience(rawAudience);
+  if (normalized.mode === 'event') {
+    const { sql, replacements } = eventAudienceSql(normalized);
+    const [row] = await query(`SELECT COUNT(*)::int AS total FROM (${sql}) t`, replacements);
+    return row.total;
+  }
   const { where, replacements } = buildWhere(rawAudience);
   const [row] = await query(
     `SELECT COUNT(DISTINCT lower(u.email))::int AS total FROM "Users" u WHERE ${where.join(' AND ')}`,
@@ -163,9 +209,18 @@ const countAudience = async (rawAudience) => {
 
 /** Paged list of matching users (one row per distinct email), newest signups first. */
 const listAudience = async (rawAudience, { search = '', page = 1, limit = 25 } = {}) => {
-  const { where, replacements } = buildWhere(rawAudience);
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 25, 1), 100);
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
+  const normalized = normalizeAudience(rawAudience);
+  if (normalized.mode === 'event') {
+    const { sql, replacements } = eventAudienceSql(normalized, search);
+    const [{ total }] = await query(`SELECT COUNT(*)::int AS total FROM (${sql}) t`, replacements);
+    const users = await query(`SELECT * FROM (${sql}) t ORDER BY t."createdAt" DESC, t.email LIMIT :limit OFFSET :offset`, {
+      ...replacements, limit: safeLimit, offset: (safePage - 1) * safeLimit,
+    });
+    return { users, total, page: safePage, limit: safeLimit, totalPages: Math.max(Math.ceil(total / safeLimit), 1) };
+  }
+  const { where, replacements } = buildWhere(rawAudience);
   const clauses = [...where];
 
   const term = String(search || '').trim().slice(0, 100);
@@ -195,14 +250,22 @@ const listAudience = async (rawAudience, { search = '', page = 1, limit = 25 } =
 
 /** Full recipient snapshot used when a campaign is sent. */
 const resolveAudience = async (rawAudience) => {
-  const { where, replacements } = buildWhere(rawAudience);
-  const rows = await query(
-    `SELECT DISTINCT ON (lower(u.email)) u.id, u.firstname AS "firstName", u.lastname AS "lastName", lower(u.email) AS email
-     FROM "Users" u WHERE ${where.join(' AND ')}
-     ORDER BY lower(u.email), u."createdAt" DESC
-     LIMIT :cap`,
-    { ...replacements, cap: MAX_AUDIENCE + 1 }
-  );
+  const normalized = normalizeAudience(rawAudience);
+  let rows;
+  if (normalized.mode === 'event') {
+    // Sent to the email they gave on the form, under their account when known.
+    const { sql, replacements } = eventAudienceSql(normalized);
+    rows = await query(`SELECT id, "firstName", "lastName", email FROM (${sql}) t LIMIT :cap`, { ...replacements, cap: MAX_AUDIENCE + 1 });
+  } else {
+    const { where, replacements } = buildWhere(rawAudience);
+    rows = await query(
+      `SELECT DISTINCT ON (lower(u.email)) u.id, u.firstname AS "firstName", u.lastname AS "lastName", lower(u.email) AS email
+       FROM "Users" u WHERE ${where.join(' AND ')}
+       ORDER BY lower(u.email), u."createdAt" DESC
+       LIMIT :cap`,
+      { ...replacements, cap: MAX_AUDIENCE + 1 }
+    );
+  }
   if (rows.length > MAX_AUDIENCE) {
     const error = new Error(`Audience is larger than ${MAX_AUDIENCE} recipients. Narrow your filters and send in parts.`);
     error.statusCode = 400;
@@ -259,11 +322,18 @@ const getAudienceOptions = async () => {
     )
   ]);
 
+  // How many event registrants each choice reaches (same rules as sending).
+  const eventCounts = {};
+  for (const payment of EVENT_PAYMENTS) {
+    eventCounts[payment] = await countAudience({ mode: 'event', event: { payment } }).catch(() => 0);
+  }
+
   return {
     liveClasses,
     liveSeries,
     signupPresets: SIGNUP_PRESETS,
-    totals
+    totals,
+    eventRegistrants: eventCounts
   };
 };
 
