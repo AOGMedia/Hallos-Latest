@@ -151,6 +151,14 @@ const PERMISSION_GROUPS = [
     ],
   },
   {
+    key: 'investors',
+    label: 'Investor relations page',
+    permissions: [
+      { code: 'investors.view', label: 'See the investor relations profiles' },
+      { code: 'investors.manage', label: 'Add, edit, reorder and remove profiles' },
+    ],
+  },
+  {
     key: 'feedback',
     label: 'Feedback',
     permissions: [

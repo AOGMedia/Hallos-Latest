@@ -18,6 +18,11 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['GET', /^\/event\/?$/, 'events.view'],
   ['PUT', /^\/event\/?$/, 'events.manage'],
   ['GET', /^\/event\/registrations(\/export)?\/?$/, 'events.view'],
+  ['GET', /^\/investor-relations\/?$/, 'investors.view'],
+  ['POST', /^\/investor-relations\/?$/, 'investors.manage'],
+  ['POST', /^\/investor-relations\/photos\/?$/, 'investors.manage'],
+  ['PUT', /^\/investor-relations\/[^/]+\/?$/, 'investors.manage'],
+  ['DELETE', /^\/investor-relations\/[^/]+\/?$/, 'investors.manage'],
 
   ['GET', /^\/users\/?$/, 'users.view'],
   ['GET', /^\/users\/[^/]+\/?$/, 'users.view'],

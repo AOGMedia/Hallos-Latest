@@ -61,6 +61,7 @@ const { ensureAnnouncements } = require('./utils/ensureAnnouncements');
 const { ensureAccountDeletion } = require('./utils/ensureAccountDeletion');
 const { ensureStaffAlerts } = require('./utils/ensureStaffAlerts');
 const { ensureFeaturedEvent } = require('./utils/ensureFeaturedEvent');
+const { ensureInvestorRelations } = require('./utils/ensureInvestorRelations');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -215,6 +216,7 @@ app.use('/api/admin/communities', adminCommunityRoutes);
 app.use('/api/admin/search', require('./routes/adminSearchRoutes'));
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/events', require('./routes/eventRoutes'));
+app.use('/api/investor-relations', require('./routes/investorRelationsRoutes'));
 app.use('/api/blog', blogRoutes);
 app.use('/api/staff', staffRoutes);
 app.use('/api/reports', require('./routes/reportRoutes'));
@@ -277,6 +279,8 @@ sequelize.sync({ force: false })
   .then(() => ensureStaffAlerts())
   // Same: without it the events page shows its built-in content and price.
   .then(() => ensureFeaturedEvent())
+  // Same: without it the investor relations page shows its built-in profile.
+  .then(() => ensureInvestorRelations())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
