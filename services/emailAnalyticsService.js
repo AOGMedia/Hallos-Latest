@@ -28,6 +28,8 @@ async function safe(label, load, fallback) {
 }
 
 const rate = (part, whole) => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : 0);
+/** Two decimals: spam limits are 0.1% and 0.3%, so 0.05% must not round to 0.1%. */
+const fineRate = (part, whole) => (whole > 0 ? Math.round((part / whole) * 10000) / 100 : 0);
 
 /** Which mail app opened it, from the image request's user agent. */
 function emailClient(agent) {
@@ -50,6 +52,20 @@ function deviceType(agent) {
   if (/Mobile|iPhone|Android/i.test(ua)) return 'Phone';
   if (!ua) return 'Unknown';
   return 'Computer';
+}
+
+const PROBLEM_KINDS = ['hard_bounce', 'soft_bounce', 'blocked', 'complaint', 'deferred'];
+
+/** The provider's reasons for bounces, blocks, delays and spam reports, most common first. */
+function problemReasonsFor(campaignIds) {
+  return select(
+    `SELECT e.kind, COALESCE(NULLIF(TRIM(e.detail), ''), 'No reason given') AS reason,
+            COUNT(DISTINCT e.recipient_id)::int AS people
+       FROM email_events e
+      WHERE e.campaign_id IN (:campaignIds) AND e.kind IN (:kinds)
+      GROUP BY 1, 2 ORDER BY people DESC LIMIT 15`,
+    { campaignIds, kinds: PROBLEM_KINDS }
+  );
 }
 
 const tally = (rows, keyOf) => {
@@ -79,6 +95,9 @@ async function getCampaignAnalytics(campaignId) {
        FROM email_campaign_recipients WHERE campaign_id = :campaignId`,
     { campaignId }
   );
+
+  // What the mail provider said about bounces, blocks and spam reports (from the webhook).
+  const problemReasons = isEmailTrackingReady() ? await safe('problem reasons', () => problemReasonsFor([campaignId]), []) : [];
 
   const failureReasons = await safe('failure reasons', () => select(
     `SELECT COALESCE(NULLIF(error, ''), 'No reason given') AS reason, status, COUNT(*)::int AS count
@@ -272,6 +291,9 @@ async function getCampaignAnalytics(campaignId) {
       complaints,
       deliveryRate: delivered > 0 ? rate(delivered, delivery.sent) : null,
       bounceRate: rate(hardBounces + softBounces + blocked, delivery.sent),
+      /** Spam reports out of emails that reached the inbox (how Gmail and Yahoo measure it). */
+      spamRate: fineRate(complaints, base),
+      problemReasons,
       firstSentAt: delivery.first_sent,
       lastSentAt: delivery.last_sent,
       sendDurationSeconds: duration,
@@ -321,7 +343,8 @@ async function getEngagementFor(campaignIds) {
             COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'click')::int AS clicked,
             COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind IN ('hard_bounce', 'soft_bounce', 'blocked'))::int AS bounced,
             COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'unsubscribe')::int AS unsubscribed,
-            COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'delivered')::int AS delivered
+            COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'delivered')::int AS delivered,
+            COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'complaint')::int AS complained
        FROM email_events e
       WHERE e.campaign_id IN (:campaignIds) AND NOT ${AUTOMATED_SQL}
       GROUP BY e.campaign_id`,
@@ -340,7 +363,202 @@ async function getEngagementFor(campaignIds) {
     bounced: map.get(id)?.bounced ?? 0,
     unsubscribed: map.get(id)?.unsubscribed ?? 0,
     delivered: map.get(id)?.delivered ?? 0,
+    complained: map.get(id)?.complained ?? 0,
   }]));
+}
+
+// --- Across campaigns ---------------------------------------------------------------
+
+const OVERVIEW_DAYS = [7, 30, 90, 365];
+const MAX_OVERVIEW_CAMPAIGNS = 200;
+
+/**
+ * How email is doing overall: every campaign that started sending in the last
+ * `days` days, with delivery, spam, bounce and engagement rates, a daily
+ * volume trend, results by email provider, why messages bounced, and how the
+ * do-not-email list grew. Only reads (no timers); each part degrades on its own.
+ */
+async function getOverview({ days } = {}) {
+  const windowDays = OVERVIEW_DAYS.includes(Number(days)) ? Number(days) : 30;
+  const since = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+  const tracked = isEmailTrackingReady();
+
+  const campaigns = await select(
+    `SELECT id, name, started_at FROM email_campaigns
+      WHERE started_at IS NOT NULL AND started_at >= :since
+      ORDER BY started_at DESC LIMIT ${MAX_OVERVIEW_CAMPAIGNS}`,
+    { since }
+  );
+  const ids = campaigns.map((c) => c.id);
+
+  const suppressions = await safe('suppressions', async () => {
+    const rows = await select(
+      `SELECT reason, COUNT(*)::int AS count FROM email_suppressions WHERE created_at >= :since GROUP BY reason`,
+      { since }
+    );
+    const [{ total }] = await select('SELECT COUNT(*)::int AS total FROM email_suppressions');
+    return { total, added: Object.fromEntries(rows.map((r) => [r.reason, r.count])) };
+  }, { total: 0, added: {} });
+
+  const webhook = { configured: isWebhookConfigured(), lastEventAt: null };
+  const empty = {
+    windowDays,
+    webhook,
+    totals: null,
+    campaigns: [],
+    daily: [],
+    domains: [],
+    problemReasons: [],
+    suppressions,
+  };
+  if (ids.length === 0) return empty;
+
+  const [sends, events, daily, domains, problemReasons, lastProvider] = await Promise.all([
+    select(
+      `SELECT campaign_id, COUNT(*)::int AS recipients,
+              COUNT(*) FILTER (WHERE status = 'sent')::int AS sent,
+              COUNT(*) FILTER (WHERE status = 'failed')::int AS failed
+         FROM email_campaign_recipients WHERE campaign_id IN (:ids) GROUP BY campaign_id`,
+      { ids }
+    ),
+    tracked ? safe('overview events', () => select(
+      `SELECT e.campaign_id,
+              COUNT(*) FILTER (WHERE e.source <> 'tracking')::int AS provider_events,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'delivered')::int AS delivered,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind IN ('hard_bounce', 'soft_bounce', 'blocked'))::int AS bounced,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'hard_bounce')::int AS hard_bounced,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'blocked')::int AS blocked,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'complaint')::int AS complaints,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'unsubscribe')::int AS unsubscribes,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind IN ('open', 'click') AND NOT ${AUTOMATED_SQL})::int AS opened,
+              COUNT(DISTINCT e.recipient_id) FILTER (WHERE e.kind = 'click' AND NOT ${AUTOMATED_SQL})::int AS clicked
+         FROM email_events e WHERE e.campaign_id IN (:ids) GROUP BY e.campaign_id`,
+      { ids }
+    ), []) : [],
+    safe('daily', () => select(
+      `SELECT day, SUM(sent)::int AS sent, SUM(delivered)::int AS delivered, SUM(bounced)::int AS bounced, SUM(complaints)::int AS complaints
+         FROM (
+           SELECT date_trunc('day', r.sent_at) AS day, COUNT(*) AS sent, 0 AS delivered, 0 AS bounced, 0 AS complaints
+             FROM email_campaign_recipients r
+            WHERE r.campaign_id IN (:ids) AND r.sent_at IS NOT NULL GROUP BY 1
+           ${tracked ? `UNION ALL
+           SELECT date_trunc('day', e.created_at), 0,
+                  COUNT(*) FILTER (WHERE e.kind = 'delivered'),
+                  COUNT(*) FILTER (WHERE e.kind IN ('hard_bounce', 'soft_bounce', 'blocked')),
+                  COUNT(*) FILTER (WHERE e.kind = 'complaint')
+             FROM email_events e
+            WHERE e.campaign_id IN (:ids) AND e.kind IN ('delivered', 'hard_bounce', 'soft_bounce', 'blocked', 'complaint')
+            GROUP BY 1` : ''}
+         ) t GROUP BY day ORDER BY day`,
+      { ids }
+    ), []),
+    safe('overview domains', () => select(
+      `WITH ev AS (
+         SELECT e.recipient_id,
+                BOOL_OR(e.kind = 'delivered') AS delivered,
+                BOOL_OR(e.kind IN ('hard_bounce', 'soft_bounce', 'blocked')) AS bounced,
+                BOOL_OR(e.kind = 'complaint') AS complained,
+                BOOL_OR(e.kind IN ('open', 'click') AND NOT ${AUTOMATED_SQL}) AS opened
+           FROM email_events e WHERE ${tracked ? 'e.campaign_id IN (:ids)' : 'FALSE'} GROUP BY e.recipient_id
+       )
+       SELECT split_part(lower(r.email), '@', 2) AS domain,
+              COUNT(*) FILTER (WHERE r.status = 'sent')::int AS sent,
+              COUNT(*) FILTER (WHERE ev.delivered)::int AS delivered,
+              COUNT(*) FILTER (WHERE ev.bounced OR r.status = 'failed')::int AS bounced,
+              COUNT(*) FILTER (WHERE ev.complained)::int AS complaints,
+              COUNT(*) FILTER (WHERE ev.opened)::int AS opened
+         FROM email_campaign_recipients r LEFT JOIN ev ON ev.recipient_id = r.id
+        WHERE r.campaign_id IN (:ids)
+        GROUP BY 1 ORDER BY sent DESC LIMIT 10`,
+      { ids }
+    ), []),
+    tracked ? safe('overview problems', () => problemReasonsFor(ids), []) : [],
+    tracked ? safe('last provider event', () => select(
+      `SELECT MAX(created_at) AS at FROM email_events WHERE campaign_id IN (:ids) AND source <> 'tracking'`,
+      { ids }
+    ), [{ at: null }]) : [{ at: null }],
+  ]);
+
+  const sendBy = new Map(sends.map((r) => [r.campaign_id, r]));
+  const eventBy = new Map(events.map((r) => [r.campaign_id, r]));
+  const zero = { provider_events: 0, delivered: 0, bounced: 0, hard_bounced: 0, blocked: 0, complaints: 0, unsubscribes: 0, opened: 0, clicked: 0 };
+  const totals = { campaigns: 0, recipients: 0, sent: 0, failed: 0, reportedSent: 0, delivered: 0, bounced: 0, hardBounced: 0, blocked: 0, complaints: 0, unsubscribes: 0, opened: 0, clicked: 0, base: 0 };
+
+  const rows = campaigns.map((c) => {
+    const s = sendBy.get(c.id) || { recipients: 0, sent: 0, failed: 0 };
+    const e = eventBy.get(c.id) || zero;
+    const reported = e.provider_events > 0;
+    // Rates are out of emails delivered once the provider reports, else out of emails sent (as on the campaign page).
+    const base = e.delivered > 0 ? e.delivered : s.sent;
+    totals.campaigns += 1;
+    totals.recipients += s.recipients;
+    totals.sent += s.sent;
+    totals.failed += s.failed;
+    if (reported) totals.reportedSent += s.sent;
+    totals.delivered += e.delivered;
+    totals.bounced += e.bounced;
+    totals.hardBounced += e.hard_bounced;
+    totals.blocked += e.blocked;
+    totals.complaints += e.complaints;
+    totals.unsubscribes += e.unsubscribes;
+    totals.opened += e.opened;
+    totals.clicked += e.clicked;
+    totals.base += base;
+    return {
+      id: c.id,
+      name: c.name,
+      startedAt: c.started_at,
+      sent: s.sent,
+      failed: s.failed,
+      reported,
+      delivered: e.delivered,
+      deliveryRate: reported ? rate(e.delivered, s.sent) : null,
+      bounceRate: rate(e.bounced, s.sent),
+      spamRate: fineRate(e.complaints, base),
+      complaints: e.complaints,
+      openRate: rate(e.opened, base),
+      clickRate: rate(e.clicked, base),
+      unsubscribeRate: rate(e.unsubscribes, base),
+    };
+  });
+
+  webhook.lastEventAt = lastProvider[0]?.at ?? null;
+  return {
+    ...empty,
+    totals: {
+      campaigns: totals.campaigns,
+      recipients: totals.recipients,
+      sent: totals.sent,
+      failed: totals.failed,
+      delivered: totals.delivered,
+      bounced: totals.bounced,
+      hardBounced: totals.hardBounced,
+      blocked: totals.blocked,
+      complaints: totals.complaints,
+      unsubscribes: totals.unsubscribes,
+      opened: totals.opened,
+      clicked: totals.clicked,
+      // Only campaigns the provider has reported on count towards the delivery rate.
+      deliveryRate: totals.reportedSent > 0 ? rate(totals.delivered, totals.reportedSent) : null,
+      bounceRate: rate(totals.bounced + totals.failed, totals.sent + totals.failed),
+      spamRate: fineRate(totals.complaints, totals.base),
+      openRate: rate(totals.opened, totals.base),
+      clickRate: rate(totals.clicked, totals.base),
+      clickToOpenRate: rate(totals.clicked, totals.opened),
+      unsubscribeRate: rate(totals.unsubscribes, totals.base),
+    },
+    // Oldest first, for the trend chart.
+    campaigns: rows.reverse(),
+    daily: daily.map((d) => ({ day: d.day, sent: d.sent, delivered: d.delivered, bounced: d.bounced, complaints: d.complaints })),
+    domains: domains.map((d) => ({
+      ...d,
+      deliveryRate: d.delivered > 0 ? rate(d.delivered, d.sent) : null,
+      bounceRate: rate(d.bounced, d.sent),
+      spamRate: fineRate(d.complaints, d.delivered > 0 ? d.delivered : d.sent),
+      openRate: rate(d.opened, d.delivered > 0 ? d.delivered : d.sent),
+    })),
+    problemReasons,
+  };
 }
 
 /** Per-recipient engagement columns and filters for the recipients table. */
@@ -369,6 +587,7 @@ const ENGAGEMENT_FILTERS = {
 module.exports = {
   getCampaignAnalytics,
   getEngagementFor,
+  getOverview,
   RECIPIENT_ENGAGEMENT_JOIN,
   ENGAGEMENT_FILTERS,
   // For tests.

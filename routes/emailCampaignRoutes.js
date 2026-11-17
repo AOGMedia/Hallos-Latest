@@ -31,6 +31,8 @@ router.use(emailPortalMiddleware);
 
 router.get('/me', controller.me);
 router.get('/stats', controller.stats);
+// Delivery, spam, bounce and engagement across campaigns (?days=7|30|90|365).
+router.get('/analytics', controller.overview);
 
 router.get('/audience/options', controller.audienceOptions);
 router.post('/audience/preview', controller.audiencePreview);

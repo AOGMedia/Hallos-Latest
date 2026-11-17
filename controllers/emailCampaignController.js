@@ -28,6 +28,8 @@ exports.me = handle(async (req) => ({
 
 exports.stats = handle(() => campaignService.getPortalStats());
 
+exports.overview = handle((req) => require('../services/emailAnalyticsService').getOverview({ days: req.query.days }));
+
 exports.audienceOptions = handle(() => audienceService.getAudienceOptions());
 
 exports.audiencePreview = handle(async (req) => {

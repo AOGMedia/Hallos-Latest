@@ -714,7 +714,7 @@ exports.updateSeries = async (req, res) => {
       try {
         attendeesNotified = await notifyScheduleChanged(series, result.nextSession);
       } catch (notifyErr) {
-        console.error('[Live Series Controller] Schedule change notification error:', notifyErr);
+        console.error(`[Live Series Controller] Schedule change notification error for series ${id} (${(notifyErr && (notifyErr.code || notifyErr.name)) || 'unknown'})`);
       }
 
       return res.json({
