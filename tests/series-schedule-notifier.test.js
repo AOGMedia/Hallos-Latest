@@ -87,6 +87,8 @@ test('the email escapes the creator-written title', async () => {
   expect(html).not.toContain('<script>');
   expect(html).toContain('&lt;script&gt;');
   expect(html).toContain('Mondays and Wednesdays');
-  expect(html).toContain('Friday, December 11, 2026, 08:00 AM UTC');
+  // Shown as the creator set it (stored as UTC), with no time-zone label.
+  expect(html).toContain('Friday, December 11, 2026, 8:00 AM');
+  expect(html).not.toContain('UTC');
   expect(subject).toBe('Schedule update: <script>x</script> Bootcamp');
 });

@@ -1880,9 +1880,18 @@ const formatScheduleDays = (days = []) => {
 };
 
 /**
+ * Class and session times are saved as the creator typed them (7:00 PM is
+ * stored as 19:00 UTC), and the site shows them that way. These read them
+ * back the same way, with no time-zone label, so the email matches the site.
+ */
+const classDateAsSet = (value) =>
+  new Date(value).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
+const classTimeAsSet = (value) =>
+  new Date(value).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC' });
+
+/**
  * To someone enrolled in a live series: the creator changed the days, the time
- * or the start date. Sessions are stored as UTC moments, so times are shown in
- * UTC here (the class page shows them in the reader's own time zone).
+ * or the start date.
  */
 exports.sendSeriesScheduleChangedEmail = async (to, firstname, details) => {
   const { seriesId, seriesTitle, days, nextSessionStart, nextSessionNumber } = details;
@@ -1890,12 +1899,8 @@ exports.sendSeriesScheduleChangedEmail = async (to, firstname, details) => {
   const seriesUrl = `${process.env.CLIENT_URL}/series/${encodeURIComponent(seriesId)}`;
 
   const next = nextSessionStart ? new Date(nextSessionStart) : null;
-  const nextDate = next
-    ? next.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })
-    : null;
-  const nextTime = next
-    ? next.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'UTC' })
-    : null;
+  const nextDate = next ? classDateAsSet(next) : null;
+  const nextTime = next ? classTimeAsSet(next) : null;
   const dayText = formatScheduleDays(days);
 
   const html = `
@@ -1906,12 +1911,11 @@ exports.sendSeriesScheduleChangedEmail = async (to, firstname, details) => {
 
       <div style="background: #f4f2fd; padding: 16px 20px; border-radius: 10px; margin: 20px 0; border-left: 4px solid #6a57e5;">
         ${dayText ? `<p style="margin: 4px 0;"><strong>Days:</strong> ${escapeHtml(dayText)}</p>` : ''}
-        ${next ? `<p style="margin: 4px 0;"><strong>Next session${nextSessionNumber ? ` (${Number(nextSessionNumber)})` : ''}:</strong> ${nextDate}, ${nextTime} UTC</p>` : ''}
+        ${next ? `<p style="margin: 4px 0;"><strong>Next session${nextSessionNumber ? ` (${Number(nextSessionNumber)})` : ''}:</strong> ${nextDate}, ${nextTime}</p>` : ''}
       </div>
 
       <p>
-        Your access hasn't changed and links you've saved still work. The class page shows
-        every session in your own time zone.
+        Your access hasn't changed. The class page always shows the latest schedule.
       </p>
 
       <div style="text-align: center; margin: 28px 0;">
@@ -1929,6 +1933,53 @@ exports.sendSeriesScheduleChangedEmail = async (to, firstname, details) => {
     from: `"hallos Team" <${process.env.EMAIL_USER}>`,
     to,
     subject: `Schedule update: ${String(seriesTitle || 'your live series').slice(0, 120)}`,
+    html,
+  });
+};
+
+/**
+ * To someone registered for a live class (free or paid): the creator moved its
+ * date or time.
+ */
+exports.sendLiveClassRescheduledEmail = async (to, firstname, details) => {
+  const { liveClassId, title: rawTitle, startTime, endTime } = details;
+  const title = escapeHtml(rawTitle || 'your live class');
+  const classUrl = `${process.env.CLIENT_URL}/live/${encodeURIComponent(liveClassId)}`;
+
+  const start = startTime ? new Date(startTime) : null;
+  const end = endTime ? new Date(endTime) : null;
+  const when = start
+    ? `${classDateAsSet(start)}, ${classTimeAsSet(start)}${end ? ` to ${classTimeAsSet(end)}` : ''}`
+    : null;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f1f1f;">
+      <h2 style="margin: 0 0 12px;">Your live class has a new time</h2>
+      <p>Hi ${escapeHtml(firstname || 'there')},</p>
+      <p>The creator of <strong>${title}</strong> has moved the class.</p>
+
+      ${when ? `
+      <div style="background: #f4f2fd; padding: 16px 20px; border-radius: 10px; margin: 20px 0; border-left: 4px solid #6a57e5;">
+        <p style="margin: 4px 0;"><strong>New time:</strong> ${when}</p>
+      </div>` : ''}
+
+      <p>Your spot is kept and your link still works.</p>
+
+      <div style="text-align: center; margin: 28px 0;">
+        <a href="${classUrl}" style="background: #6a57e5; color: #ffffff; padding: 12px 24px; border-radius: 999px; text-decoration: none; font-weight: bold; display: inline-block;">
+          View the class
+        </a>
+      </div>
+
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: `New time: ${String(rawTitle || 'your live class').slice(0, 120)}`,
     html,
   });
 };

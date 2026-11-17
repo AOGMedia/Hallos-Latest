@@ -51,6 +51,13 @@ router.post('/:id/start-zegocloud', authMiddleware, liveController.startZegoClou
 router.post('/:id/end-zegocloud', authMiddleware, liveController.endZegoCloudSession);
 router.post('/:id/heartbeat-zegocloud', authMiddleware, liveController.zegoCloudHeartbeat);
 router.delete('/:id', authMiddleware, liveController.deleteLiveClass);
+// Edit (creator only). Same upload fields as create, for a new thumbnail.
+router.put('/:id', authMiddleware, upload.fields([
+  { name: 'thumbnail', maxCount: 1 },
+  { name: 'thumbnailUrl', maxCount: 1 },
+  { name: 'image', maxCount: 1 },
+  { name: 'file', maxCount: 1 }
+]), liveController.updateLiveClass);
 router.patch('/:id/community', authMiddleware, liveController.linkLiveClassToCommunity);
 
 module.exports = router;

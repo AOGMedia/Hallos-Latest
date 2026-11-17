@@ -821,6 +821,170 @@ exports.getMyLiveClasses = async (req, res) => {
  * Delete live class
  * DELETE /live/:id
  */
+// ============================
+//  UPDATE LIVE CLASS (creator only)
+// ============================
+/** Providers a scheduled class can switch between (Mux needs a stream made at create). */
+const SWITCHABLE_PROVIDERS = ['zegocloud', 'getstream'];
+
+/** A date sent by the client, or null if missing; `undefined` when unparseable. */
+const parseClassTime = (value) => {
+  if (value === undefined || value === null || value === '') return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? undefined : d;
+};
+
+/**
+ * Edit a live class: details at any time; date, time and streaming method
+ * only while it is still scheduled (not live or over). Fields that aren't
+ * sent keep their value, so partial updates are safe. Moving the date or time
+ * emails everyone registered or paid.
+ * PUT /api/live/:id
+ */
+exports.updateLiveClass = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+    const {
+      title,
+      description,
+      price,
+      category,
+      thumbnailUrl,
+      privacy,
+      maxParticipants,
+      streamingProvider,
+      startTime,
+      endTime
+    } = req.body;
+
+    const liveClass = await LiveClass.findByPk(id);
+    if (!liveClass) {
+      return res.status(404).json({ success: false, message: 'Live class not found' });
+    }
+    if (String(liveClass.userId) !== String(userId)) {
+      return res.status(403).json({ success: false, message: 'Only the creator can edit this live class' });
+    }
+
+    const updates = {};
+
+    if (title !== undefined) {
+      const trimmed = String(title).trim();
+      if (!trimmed) return res.status(400).json({ success: false, message: 'Title is required' });
+      updates.title = trimmed;
+    }
+    if (description !== undefined) updates.description = description;
+    if (category !== undefined) updates.category = category || null;
+
+    if (price !== undefined && price !== '') {
+      const amount = Number(price);
+      if (!Number.isFinite(amount) || amount < 0) {
+        return res.status(400).json({ success: false, message: 'Price must be zero or more' });
+      }
+      updates.price = amount;
+    }
+
+    if (privacy !== undefined) {
+      if (!['public', 'private'].includes(privacy)) {
+        return res.status(400).json({ success: false, message: 'Privacy must be public or private' });
+      }
+      updates.privacy = privacy;
+    }
+
+    if (maxParticipants !== undefined && maxParticipants !== '') {
+      const max = Number(maxParticipants);
+      if (!Number.isInteger(max) || max < 1 || max > 1000) {
+        return res.status(400).json({ success: false, message: 'Max participants must be between 1 and 1000' });
+      }
+      updates.max_participants = max;
+    }
+
+    // Thumbnail: a new upload, or a URL string (same field names as create).
+    const thumbnailFile = req.files?.thumbnail?.[0] || req.files?.thumbnailUrl?.[0] || req.files?.image?.[0] || req.files?.file?.[0];
+    if (thumbnailFile) {
+      updates.thumbnailUrl = thumbnailFile.location || `/upload/${thumbnailFile.filename}`;
+    } else if (thumbnailUrl) {
+      updates.thumbnailUrl = thumbnailUrl;
+    }
+
+    const isScheduled = liveClass.status === 'scheduled';
+
+    // Streaming method: only before the class starts, and only between the
+    // in-app providers (a Mux class has a stream created for it).
+    const currentProvider = liveClass.streaming_provider || 'zegocloud';
+    if (streamingProvider && streamingProvider !== currentProvider) {
+      if (!isScheduled) {
+        return res.status(409).json({ success: false, message: "The streaming method can't change once the class has started" });
+      }
+      if (!SWITCHABLE_PROVIDERS.includes(streamingProvider) || !SWITCHABLE_PROVIDERS.includes(currentProvider)) {
+        return res.status(400).json({ success: false, message: "This class's streaming method can't be changed" });
+      }
+      if (streamingProvider === 'getstream' && !isGetStreamAvailable()) {
+        return res.status(400).json({ success: false, message: 'GetStream live classes are not available yet. Please choose Stream In-App.' });
+      }
+      updates.streaming_provider = streamingProvider;
+    }
+
+    // Date and time: only while scheduled. Times are saved as the creator
+    // typed them (see the create form), so "in the past" allows a day's
+    // leeway for time zones, like series.
+    const newStart = parseClassTime(startTime);
+    const newEnd = parseClassTime(endTime);
+    if (newStart === undefined || newEnd === undefined) {
+      return res.status(400).json({ success: false, message: 'Invalid date or time' });
+    }
+    const sameMoment = (a, b) => (a && b ? new Date(a).getTime() === new Date(b).getTime() : !a && !b);
+    const startChanged = newStart !== null && !sameMoment(newStart, liveClass.startTime);
+    const endChanged = newEnd !== null && !sameMoment(newEnd, liveClass.endTime);
+    const rescheduled = startChanged || endChanged;
+
+    if (rescheduled) {
+      if (!isScheduled) {
+        return res.status(409).json({ success: false, message: "The date and time can't change once the class has started" });
+      }
+      const effectiveStart = newStart || (liveClass.startTime ? new Date(liveClass.startTime) : null);
+      const effectiveEnd = newEnd || (liveClass.endTime ? new Date(liveClass.endTime) : null);
+      if (effectiveStart && effectiveEnd && effectiveEnd <= effectiveStart) {
+        return res.status(400).json({ success: false, message: 'End time must be after start time' });
+      }
+      if (startChanged && newStart < new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+        return res.status(400).json({ success: false, message: 'The start time cannot be in the past' });
+      }
+      if (startChanged) updates.startTime = newStart;
+      if (endChanged) updates.endTime = newEnd;
+    }
+
+    await liveClass.update(updates);
+
+    // Tell attendees about a new time; never holds up or fails the save.
+    let attendeesNotified = 0;
+    if (rescheduled) {
+      try {
+        const { notifyLiveClassRescheduled } = require('../services/liveClassScheduleNotifier');
+        attendeesNotified = await notifyLiveClassRescheduled(liveClass);
+      } catch (notifyErr) {
+        console.error(`[Live Controller] Reschedule notification error for class ${id} (${(notifyErr && (notifyErr.code || notifyErr.name)) || 'unknown'})`);
+      }
+    }
+
+    let message = 'Live class updated successfully';
+    if (rescheduled) {
+      message = attendeesNotified > 0
+        ? `Class updated. ${attendeesNotified} attendee${attendeesNotified === 1 ? '' : 's'} will get an email about the new time.`
+        : 'Class updated with the new time.';
+    }
+
+    return res.json({
+      ...createdLiveClassResponse(liveClass),
+      message,
+      rescheduled,
+      attendeesNotified
+    });
+  } catch (error) {
+    return handleError(res, error);
+  }
+};
+
 exports.deleteLiveClass = async (req, res) => {
   try {
     const { id } = req.params;
