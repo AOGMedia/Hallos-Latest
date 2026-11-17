@@ -285,6 +285,15 @@ router.put('/event', userActionLimiter, adminEventController.updateEvent);
 router.get('/event/registrations', adminEventController.listRegistrations);
 router.get('/event/registrations/export', userActionLimiter, adminEventController.exportRegistrations);
 
+// Investor relations page (/investor-relations): profiles.
+const adminInvestorController = require('../controllers/adminInvestorController');
+router.get('/investor-relations', adminInvestorController.list);
+router.post('/investor-relations', userActionLimiter, adminInvestorController.create);
+router.put('/investor-relations/order', userActionLimiter, adminInvestorController.reorder);
+router.post('/investor-relations/photos', userActionLimiter, require('../controllers/emailImageController').receiveImage, adminInvestorController.uploadPhoto);
+router.put('/investor-relations/:id', userActionLimiter, adminInvestorController.update);
+router.delete('/investor-relations/:id', userActionLimiter, adminInvestorController.remove);
+
 // Payout management
 router.get('/payouts',adminDashboardController.getPayouts);
 router.patch('/payouts/:id/approve', adminDashboardController.approvePayout);
