@@ -63,6 +63,7 @@ const { ensureStaffAlerts } = require('./utils/ensureStaffAlerts');
 const { ensureFeaturedEvent } = require('./utils/ensureFeaturedEvent');
 const { ensureInvestorRelations } = require('./utils/ensureInvestorRelations');
 const { ensureStaffLogins } = require('./utils/ensureStaffLogins');
+const { ensureRecordingPreferences } = require('./utils/ensureRecordingPreferences');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -288,6 +289,8 @@ sequelize.sync({ force: false })
   .then(() => ensureInvestorRelations())
   // Same: without it staff roles work as before, just without created staff logins.
   .then(() => ensureStaffLogins())
+  // Same: without it GetStream recordings use the standard settings, as before.
+  .then(() => ensureRecordingPreferences())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

@@ -3,6 +3,7 @@ const router = express.Router();
 const authMiddleware = require('../middleware/authMiddleware');
 const getStreamController = require('../controllers/getStreamController');
 const roomExtras = require('../controllers/getStreamRoomExtrasController');
+const recordingSettings = require('../controllers/recordingSettingsController');
 const { giftRateLimit, photoRateLimit, parseChatPhoto } = require('../middleware/getStreamRoomLimits');
 
 /**
@@ -11,6 +12,11 @@ const { giftRateLimit, photoRateLimit, parseChatPhoto } = require('../middleware
  */
 // Two segments, so it can't be mistaken for GET /live/:id (liveRoutes).
 router.get('/getstream/recorded-classes', authMiddleware, getStreamController.listRecordedClasses);
+
+// The signed-in creator's own recording settings (quality, layout, look, auto-record).
+router.get('/getstream/recording-settings', authMiddleware, recordingSettings.get);
+router.put('/getstream/recording-settings', authMiddleware, recordingSettings.save);
+router.delete('/getstream/recording-settings', authMiddleware, recordingSettings.reset);
 
 router.post('/:id/start-getstream', authMiddleware, getStreamController.startSession);
 router.post('/:id/join-getstream', authMiddleware, getStreamController.joinSession);
