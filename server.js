@@ -121,6 +121,10 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 
+// Health checks (liveness /health, readiness /health/ready): before rate
+// limiting and the rest of the middleware, so they stay cheap and instant.
+app.use('/health', require('./routes/healthRoutes').createHealthRouter({ sequelize }));
+
 // Use the library's own ipKeyGenerator for proper IPv4/IPv6 handling
 const { ipKeyGenerator } = require('express-rate-limit');
 
