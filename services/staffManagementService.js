@@ -152,6 +152,7 @@ async function listStaff() {
     }),
     select(
       `SELECT a.user_id, a.invite_pending, a.created_at, r.id AS role_id, r.name AS role_name
+              ${require('../utils/ensureStaffLogins').isStaffLoginsReady() ? ', a.admin_only, a.disabled_at, a.password_set_at' : ''}
          FROM staff_assignments a JOIN staff_roles r ON r.id = a.role_id`
     ),
   ]);
@@ -172,6 +173,10 @@ async function listStaff() {
         roleName: row.role_name,
         invitePending: row.invite_pending,
         addedAt: row.created_at,
+        // Staff-only login made by a super admin (admin app only), and whether it's turned off.
+        staffLogin: row.admin_only === true,
+        disabled: Boolean(row.disabled_at),
+        passwordSetAt: row.password_set_at ?? null,
       }))
       .sort((a, b) => a.firstname.localeCompare(b.firstname)),
   };
@@ -295,7 +300,12 @@ async function updateMemberRole(userId, roleId, actorId) {
 /** Ends staff access. The person's normal Hallos account is left as it was. */
 async function removeMember(userId) {
   assertReady();
-  await getAssignment(userId);
+  const assignment = await getAssignment(userId);
+  // A staff login exists only for staff work: removing it would leave a login
+  // that's no longer limited to the admin app. Turning it off keeps its history.
+  if (assignment.admin_only) {
+    throw new StaffError(400, 'This is a staff login. Turn it off instead; its activity history stays.');
+  }
   await sequelize.transaction(async (transaction) => {
     await sequelize.query('DELETE FROM staff_assignments WHERE user_id = :userId', {
       replacements: { userId },
@@ -351,6 +361,120 @@ async function setPasswordFromInvite(token, newPassword) {
   });
 }
 
+// --- Staff logins (an email and password made by a super admin, admin app only) ---
+
+const logins = require('./staffLoginService');
+const loginsReady = () => require('../utils/ensureStaffLogins').isStaffLoginsReady();
+const MIN_STAFF_PASSWORD_LENGTH = 12;
+
+const assertLoginsReady = () => {
+  assertReady();
+  if (!loginsReady()) throw new StaffError(503, 'Staff logins are unavailable right now. Check the server logs.');
+};
+
+/** A password the super admin typed, or a generated one. Returns the plain text to show once. */
+function choosePassword(custom) {
+  if (custom === undefined || custom === null || custom === '') return logins.generatePassword();
+  if (typeof custom !== 'string' || custom.length < MIN_STAFF_PASSWORD_LENGTH || custom.length > 128) {
+    throw new StaffError(400, `Use a password of at least ${MIN_STAFF_PASSWORD_LENGTH} characters, or leave it empty to generate one.`);
+  }
+  return custom;
+}
+
+/**
+ * Creates a staff-only login: a new account with this email and a password the
+ * super admin hands over. It works only in the admin app. The password is
+ * returned once and never stored readable.
+ */
+async function createLogin({ email, firstname, lastname, roleId, password }, actorId) {
+  assertLoginsReady();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(cleanEmail) || cleanEmail.length > 255) throw new StaffError(400, 'Enter a valid email address.');
+  const first = String(firstname || '').trim().slice(0, 100);
+  const last = String(lastname || '').trim().slice(0, 100);
+  if (!first || !last) throw new StaffError(400, 'Add their first and last name.');
+  const role = await getRole(roleId);
+  // Never turn someone's own Hallos account into a work login.
+  if (await findUserByEmail(cleanEmail)) {
+    throw new StaffError(409, 'An account already uses that email. Choose another email, or email them an invite instead.');
+  }
+  const plain = choosePassword(password);
+  const now = logins.cutoffNow();
+  const user = await sequelize.transaction(async (transaction) => {
+    const created = await User.create(
+      { firstname: first, lastname: last, email: cleanEmail, password: await bcrypt.hash(plain, 10) },
+      { transaction }
+    );
+    await sequelize.query(
+      `INSERT INTO staff_assignments (user_id, role_id, assigned_by, invite_pending, admin_only, password_set_at, sessions_valid_after)
+       VALUES (:userId, :roleId, :actorId, false, true, :now, :now)`,
+      { replacements: { userId: created.id, roleId: role.id, actorId, now }, transaction }
+    );
+    return created;
+  });
+  console.log(`[StaffManagement] Staff login ${user.id} created by ${actorId}`);
+  return { member: toPerson(user), password: plain };
+}
+
+/**
+ * Sets a new password (generated unless one is given) and signs the person out
+ * everywhere. Works for any staff member; super admins aren't staff members.
+ */
+async function resetPassword(userId, { password } = {}, actorId) {
+  assertLoginsReady();
+  const assignment = await getAssignment(userId);
+  const user = await User.findByPk(assignment.user_id);
+  if (!user) throw new StaffError(404, 'That staff member no longer exists.');
+  const plain = choosePassword(password);
+  const now = logins.cutoffNow();
+  user.password = await bcrypt.hash(plain, 10);
+  await user.save();
+  await run(
+    `UPDATE staff_assignments SET password_set_at = :now, sessions_valid_after = :now, invite_pending = false,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE user_id = :userId`,
+    { userId: user.id, now }
+  );
+  logins.noteSessionsEnded(user.id, now, Boolean(assignment.disabled_at));
+  console.log(`[StaffManagement] Password reset for staff ${user.id} by ${actorId}`);
+  return { member: toPerson(user), password: plain };
+}
+
+/** Name and email of a staff-only login (someone's own account is theirs to change). */
+async function updateLoginDetails(userId, { email, firstname, lastname }) {
+  assertLoginsReady();
+  const assignment = await getAssignment(userId);
+  if (!assignment.admin_only) throw new StaffError(400, 'This is their own Hallos account, so they change their own details.');
+  const user = await User.findByPk(assignment.user_id);
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const first = String(firstname || '').trim().slice(0, 100);
+  const last = String(lastname || '').trim().slice(0, 100);
+  if (!EMAIL_RE.test(cleanEmail) || cleanEmail.length > 255) throw new StaffError(400, 'Enter a valid email address.');
+  if (!first || !last) throw new StaffError(400, 'Add their first and last name.');
+  if (cleanEmail !== String(user.email).toLowerCase()) {
+    const taken = await findUserByEmail(cleanEmail);
+    if (taken && taken.id !== user.id) throw new StaffError(409, 'Another account already uses that email.');
+  }
+  await user.update({ email: cleanEmail, firstname: first, lastname: last });
+  return toPerson(user);
+}
+
+/** Turns a staff-only login off (signed out everywhere, can't sign in) or back on. */
+async function setLoginActive(userId, active) {
+  assertLoginsReady();
+  const assignment = await getAssignment(userId);
+  if (!assignment.admin_only) throw new StaffError(400, 'Only staff logins can be turned off. To end this person’s access, remove them from the team.');
+  const now = logins.cutoffNow();
+  if (active) {
+    await run('UPDATE staff_assignments SET disabled_at = NULL, sessions_valid_after = :now, updated_at = CURRENT_TIMESTAMP WHERE user_id = :userId', { userId: assignment.user_id, now });
+    logins.noteReactivated(assignment.user_id, now);
+  } else {
+    await run('UPDATE staff_assignments SET disabled_at = :now, sessions_valid_after = :now, updated_at = CURRENT_TIMESTAMP WHERE user_id = :userId', { userId: assignment.user_id, now });
+    logins.noteSessionsEnded(assignment.user_id, now, true);
+  }
+  return { active: Boolean(active) };
+}
+
 module.exports = {
   StaffError,
   listRoles,
@@ -363,4 +487,8 @@ module.exports = {
   removeMember,
   resendInvite,
   setPasswordFromInvite,
+  createLogin,
+  resetPassword,
+  updateLoginDetails,
+  setLoginActive,
 };

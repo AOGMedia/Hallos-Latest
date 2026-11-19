@@ -44,6 +44,13 @@ exports.updateMemberRole = handle((req) =>
 exports.removeMember = handle((req) => service.removeMember(req.params.userId));
 exports.resendInvite = handle((req) => service.resendInvite(req.params.userId));
 
+// Staff logins (email + password made here, admin app only). Passwords are in
+// the response once; the staff action log hides any "password" field it records.
+exports.createLogin = handle((req) => service.createLogin(req.body, req.user.id), 201);
+exports.resetPassword = handle((req) => service.resetPassword(req.params.userId, req.body || {}, req.user.id));
+exports.updateLoginDetails = handle((req) => service.updateLoginDetails(req.params.userId, req.body || {}));
+exports.setLoginActive = handle((req) => service.setLoginActive(req.params.userId, req.body?.active === true));
+
 exports.setPassword = handle((req) =>
   service.setPasswordFromInvite(req.body.token, req.body.password)
 );

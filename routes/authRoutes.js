@@ -47,9 +47,13 @@ router.get('/google', passport.authenticate('google', { scope: ['email', 'profil
 
 router.get('/google/callback', 
   passport.authenticate('google', { failureRedirect: '/' }),
-  (req, res) => {
+  async (req, res) => {
     if (require('../services/suspensionService').isSuspended(req.user.id)) {
       return res.redirect('https://www.hallos.net/signin?error=account_suspended');
+    }
+    // Staff logins can't sign in with Google (or anywhere outside the admin app).
+    if (await require('../services/staffLoginService').loginGate(req.user.id, null)) {
+      return res.redirect('https://www.hallos.net/signin?error=staff_login');
     }
     recordLogin(req.user.id, req, 'google');
     const token = jwt.sign(
