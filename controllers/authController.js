@@ -154,7 +154,12 @@ exports.login = async (req, res) => {
 
     const suspension = require('../services/suspensionService');
     if (suspension.isSuspended(user.id)) return res.status(403).json(suspension.suspendedResponse(user.id));
-    const token = jwt.sign({ id: user.id, role: user.role }, SECRET_KEY, { expiresIn: '1d' });
+    // Staff logins made by a super admin sign in only to the admin app; turned-off ones not at all.
+    const staffGate = await require('../services/staffLoginService').loginGate(user.id, req);
+    if (staffGate) return res.status(staffGate.status).json(staffGate.body);
+    // ts: when this sign-in was made, to the millisecond (lets a password reset end
+    // earlier sign-ins exactly; the standard iat is only whole seconds).
+    const token = jwt.sign({ id: user.id, role: user.role, ts: Date.now() }, SECRET_KEY, { expiresIn: '1d' });
     recordLogin(user.id, req, 'password');
 
     // Return user object with role for frontend redirect logic

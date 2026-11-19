@@ -21,11 +21,14 @@ const LEGACY_EMAIL_MARKETER = Object.freeze({
 });
 
 const findAssignedRole = async (userId) => {
+  // A staff login that's been turned off gives no access. (Only checked once
+  // that column exists, so this lookup can't start failing before it does.)
+  const turnedOff = require('../utils/ensureStaffLogins').isStaffLoginsReady() ? 'AND a.disabled_at IS NULL' : '';
   const rows = await sequelize.query(
     `SELECT r.name, r.permissions
        FROM staff_assignments a
        JOIN staff_roles r ON r.id = a.role_id
-      WHERE a.user_id = :userId`,
+      WHERE a.user_id = :userId ${turnedOff}`,
     { replacements: { userId }, type: QueryTypes.SELECT }
   );
   return rows[0] || null;

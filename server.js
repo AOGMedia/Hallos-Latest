@@ -62,6 +62,7 @@ const { ensureAccountDeletion } = require('./utils/ensureAccountDeletion');
 const { ensureStaffAlerts } = require('./utils/ensureStaffAlerts');
 const { ensureFeaturedEvent } = require('./utils/ensureFeaturedEvent');
 const { ensureInvestorRelations } = require('./utils/ensureInvestorRelations');
+const { ensureStaffLogins } = require('./utils/ensureStaffLogins');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -281,6 +282,8 @@ sequelize.sync({ force: false })
   .then(() => ensureFeaturedEvent())
   // Same: without it the investor relations page shows its built-in profile.
   .then(() => ensureInvestorRelations())
+  // Same: without it staff roles work as before, just without created staff logins.
+  .then(() => ensureStaffLogins())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

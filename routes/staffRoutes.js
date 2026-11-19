@@ -39,4 +39,10 @@ router.put('/members/:userId', controller.updateMemberRole);
 router.delete('/members/:userId', controller.removeMember);
 router.post('/members/:userId/resend-invite', controller.resendInvite);
 
+// Staff logins: an email and password made by a super admin, used only in the admin app.
+router.post('/logins', controller.createLogin);
+router.post('/members/:userId/password', controller.resetPassword);
+router.put('/members/:userId/details', controller.updateLoginDetails);
+router.put('/members/:userId/active', controller.setLoginActive);
+
 module.exports = router;
