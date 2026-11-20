@@ -64,6 +64,7 @@ const { ensureFeaturedEvent } = require('./utils/ensureFeaturedEvent');
 const { ensureInvestorRelations } = require('./utils/ensureInvestorRelations');
 const { ensureStaffLogins } = require('./utils/ensureStaffLogins');
 const { ensureRecordingPreferences } = require('./utils/ensureRecordingPreferences');
+const { ensureClassFeedback } = require('./utils/ensureClassFeedback');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -230,6 +231,8 @@ app.use('/api/announcements', require('./routes/announcementRoutes'));
 app.use('/api/account', require('./routes/accountRoutes'));
 app.use('/api/staff-alerts', require('./routes/staffAlertRoutes'));
 app.use('/api/notifications', require('./routes/notificationRoutes'));
+// Feedback after live classes and series sessions (personal signed links).
+app.use('/api/class-feedback', require('./routes/classFeedbackRoutes'));
 app.use('/uploads', express.static('uploads'));
 
 app.use('/videos', videoRoutes);
@@ -291,6 +294,8 @@ sequelize.sync({ force: false })
   .then(() => ensureStaffLogins())
   // Same: without it GetStream recordings use the standard settings, as before.
   .then(() => ensureRecordingPreferences())
+  // Same: without it the class feedback form says to try again later.
+  .then(() => ensureClassFeedback())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);
@@ -323,6 +328,13 @@ sequelize.sync({ force: false })
       emailCampaignWorker.start();
       setupEmailScheduler();
       setupQuizScheduledTasks();
+
+      // Emails feedback links to people who joined, a little after each class ends.
+      try {
+        require('./services/classFeedbackDispatchService').start();
+      } catch (err) {
+        console.error('❌ Failed to start class feedback emails:', err.message);
+      }
 
       // Removes chat photos of GetStream classes/sessions that have ended.
       try {

@@ -5,6 +5,7 @@ const { isLiveIdempotencyEnabled } = require('../utils/ensureLiveIdempotency');
 const User = require('../models/User');
 const { isGetStreamAvailable } = require('../utils/liveProviders');
 const { avatarUrlOf, withAvatar } = require('../utils/userAvatar');
+const { recordAttendance } = require('../services/classAttendanceService');
 
 /**
  * A listed class with each host's profile picture (hosts[].User.avatarUrl)
@@ -557,7 +558,8 @@ exports.startZegoCloudSession = async (req, res) => {
       // ✅ Generate fresh token for creator instead of using stored one
       const { zegoCloudService } = require('../services/zegoCloudService');
       const freshToken = zegoCloudService.generateToken(liveClass.zego_room_id, userId, 'host');
-      
+      recordAttendance({ kind: 'class', targetId: liveClass.id, userId, role: 'host' });
+
       return res.status(409).json({
         success: false,
         message: 'Live class is already active',
@@ -577,6 +579,7 @@ exports.startZegoCloudSession = async (req, res) => {
       maxParticipants: liveClass.max_participants,
       privacy: liveClass.privacy
     });
+    recordAttendance({ kind: 'class', targetId: liveClass.id, userId, role: 'host' });
 
     return res.status(200).json({
       success: true,

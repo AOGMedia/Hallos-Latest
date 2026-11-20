@@ -4,6 +4,7 @@ const { zegoCloudService, ZegoCloudError } = require('../services/zegoCloudServi
 const LiveClass = require('../models/liveClass');
 const User = require('../models/User');
 const crypto = require('crypto');
+const { recordAttendance } = require('../services/classAttendanceService');
 
 /**
  * ZegoCloud Controller
@@ -413,6 +414,21 @@ const joinRoom = async (req, res) => {
     );
 
     console.log(`[ZegoCloud Controller] User ${userId} joined as ${userType} with role ${participantRole}`);
+
+    // Attendance for after-class feedback (background; never affects the join).
+    // A claimed co-host only counts as a host if they really are one.
+    setImmediate(async () => {
+      let attendanceRole = isCreator ? 'host' : 'participant';
+      if (!isCreator && isCohost) {
+        try {
+          const { LiveHost } = require('../models/liveIndex');
+          if (await LiveHost.findOne({ where: { liveClassId: liveClass.id, userId } })) attendanceRole = 'host';
+        } catch {
+          // Keep them as a participant.
+        }
+      }
+      recordAttendance({ kind: 'class', targetId: liveClass.id, userId, role: attendanceRole });
+    });
 
     // Return response with official token
     res.status(200).json({
