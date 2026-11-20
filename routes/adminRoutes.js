@@ -12,6 +12,7 @@ const transactionHistoryController = require('../controllers/transactionHistoryC
 const adminDashboardController = require('../controllers/adminDashboardController');
 const adminUserController = require('../controllers/adminUserController');
 const adminLiveController = require('../controllers/adminLiveController');
+const adminClassFeedbackController = require('../controllers/adminClassFeedbackController');
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = require('express-rate-limit');
 
@@ -262,6 +263,11 @@ router.post('/live/classes/:id/end', adminLiveController.endClass);
 router.get('/live/series', adminLiveController.listSeries);
 router.get('/live/series/:id', adminLiveController.getSeries);
 router.post('/live/sessions/:id/end', adminLiveController.endSession);
+
+// Feedback after live classes and series sessions (who said what, trends).
+router.get('/class-feedback/overview', adminClassFeedbackController.overview);
+router.get('/class-feedback/targets', adminClassFeedbackController.list);
+router.get('/class-feedback/targets/:kind/:id', adminClassFeedbackController.detail);
 router.get('/users/:id/activity', adminUserController.getActivity);
 router.get('/users/:id/suspensions', adminUserController.getSuspensions);
 router.post('/users/:id/suspend', userActionLimiter, adminUserController.suspend);

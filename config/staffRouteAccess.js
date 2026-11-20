@@ -40,6 +40,8 @@ const ADMIN_ROUTE_PERMISSIONS = [
   ['GET', /^\/live\/(overview|classes|series)\/?$/, 'live.view'],
   ['GET', /^\/live\/(classes|series)\/[^/]+\/?$/, 'live.view'],
   ['POST', /^\/live\/(classes|sessions)\/[^/]+\/end\/?$/, 'live.manage'],
+  ['GET', /^\/class-feedback\/(overview|targets)\/?$/, 'feedback.classes'],
+  ['GET', /^\/class-feedback\/targets\/(class|session)\/[^/]+\/?$/, 'feedback.classes'],
   ['GET', /^\/content\/(videos|freebies|courses)\/?$/, 'content.view'],
   ['PATCH', /^\/content\/courses\/[^/]+\/?$/, 'content.manage'],
   ['POST', /^\/content\/(video|freebie)\/[^/]+\/(takedown|restore)\/?$/, 'content.manage'],

@@ -3,6 +3,7 @@ const liveSeriesService = require('../services/liveSeriesService');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
 const recordingPublishService = require('../services/recordingPublishService');
+const { recordAttendance } = require('../services/classAttendanceService');
 const getStreamCohostService = require('../services/getStreamCohostService');
 const { seriesProviderOf } = require('../utils/liveProviders');
 
@@ -60,6 +61,7 @@ exports.startSession = async (req, res) => {
 
     const creator = await User.findByPk(req.user.id);
     const result = await getStreamService.startSeriesSession(session, session.series, creator || { id: req.user.id });
+    recordAttendance({ kind: 'session', targetId: session.id, userId: req.user.id, role: 'host' });
 
     return res.status(200).json({
       success: true,
@@ -102,6 +104,7 @@ exports.joinSession = async (req, res) => {
       isHost: isCreator,
       isCohost
     });
+    recordAttendance({ kind: 'session', targetId: session.id, userId, role: isCreator || isCohost ? 'host' : 'participant' });
 
     return res.status(200).json({
       success: true,

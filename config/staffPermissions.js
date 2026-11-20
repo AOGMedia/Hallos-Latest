@@ -164,6 +164,11 @@ const PERMISSION_GROUPS = [
     permissions: [
       { code: 'feedback.view', label: 'Read feedback' },
       { code: 'feedback.manage', label: 'Update and delete feedback' },
+      {
+        code: 'feedback.classes',
+        label: 'Read feedback from live classes, including who sent anonymous answers',
+        risky: true,
+      },
     ],
   },
   {

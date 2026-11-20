@@ -80,24 +80,56 @@ const upsertUser = async (user) => {
 // Call-level building blocks, shared by live classes and series sessions.
 // ---------------------------------------------------------------------------
 
+/** How every call records unless the creator saved their own settings. */
+const STANDARD_RECORDING = { mode: 'available', quality: '720p' };
+
 /**
  * Get or create a call with the creator as host and recording available.
+ * `recording` (the creator's saved settings, only when they chose to record
+ * automatically) is set on a new call; if GetStream refuses it, the call is
+ * created with the standard settings instead, so a class always starts.
  * @returns {Promise<boolean>} whether the call has already been ended
  */
-const openCall = async (callId, creator, { maxParticipants, custom }) => {
-  const response = await getClient().video.call(CALL_TYPE, callId).getOrCreate({
-    data: {
-      created_by_id: streamUserId(creator.id),
-      members: [{ user_id: streamUserId(creator.id), role: HOST_CALL_ROLE }],
-      custom,
-      settings_override: {
-        recording: { mode: 'available', quality: '720p' },
-        ...(maxParticipants ? { limits: { max_participants: maxParticipants } } : {})
+const openCall = async (callId, creator, { maxParticipants, custom, recording }) => {
+  const create = (recordingSettings) =>
+    getClient().video.call(CALL_TYPE, callId).getOrCreate({
+      data: {
+        created_by_id: streamUserId(creator.id),
+        members: [{ user_id: streamUserId(creator.id), role: HOST_CALL_ROLE }],
+        custom,
+        settings_override: {
+          recording: recordingSettings,
+          ...(maxParticipants ? { limits: { max_participants: maxParticipants } } : {})
+        }
       }
+    });
+
+  let response;
+  if (recording) {
+    try {
+      response = await create(recording);
+    } catch (error) {
+      console.error(`[GetStream] Saved recording settings refused for call ${callId}; using the standard ones:`, error.message);
+      response = await create(STANDARD_RECORDING);
     }
-  });
+  } else {
+    response = await create(STANDARD_RECORDING);
+  }
   return Boolean(response.call && response.call.ended_at);
 };
+
+/**
+ * The creator's saved recording settings to set when a call is created —
+ * only when they chose to record automatically (GetStream needs that set up
+ * front). Otherwise null: settings are applied when they press Record.
+ */
+const autoRecordingFor = async (creatorId, title) => {
+  const saved = await recordingSettings().savedOverrideFor(creatorId, { title, mode: 'auto-on' });
+  return saved && saved.settings.autoRecord ? saved.recording : null;
+};
+
+/** Loaded on first use (it touches the database; this module mostly doesn't). */
+const recordingSettings = () => require('./recordingSettingsService');
 
 /** Give someone host rights inside a call (co-hosts). */
 const promoteToHost = (callId, userId) =>
@@ -123,9 +155,23 @@ const endCall = async (callId) => {
   }
 };
 
-/** Start or stop a call's composite recording, with clear errors for the usual states. */
-const recordCall = async (callId, action) => {
+/**
+ * Start or stop a call's composite recording, with clear errors for the usual
+ * states. On start, `override` (the creator's saved settings) is applied to
+ * the call first; if that fails, recording still starts with the call's
+ * current settings and `settingsApplied` is false.
+ */
+const recordCall = async (callId, action, override = null) => {
   const call = getClient().video.call(CALL_TYPE, callId);
+  let settingsApplied = true;
+  if (action === 'start' && override) {
+    try {
+      await call.update({ settings_override: { recording: override } });
+    } catch (error) {
+      settingsApplied = false;
+      console.error(`[GetStream] Could not apply recording settings to call ${callId}; recording with the current ones:`, error.message);
+    }
+  }
   try {
     if (action === 'start') {
       await call.startRecording({ recording_type: RECORDING_TYPE });
@@ -146,7 +192,15 @@ const recordCall = async (callId, action) => {
     }
     throw error;
   }
-  return { recording: action === 'start' };
+  return action === 'start' && override
+    ? { recording: true, settingsApplied }
+    : { recording: action === 'start' };
+};
+
+/** The creator's saved settings to apply when they press Record (null: standard). */
+const manualRecordingFor = async (creatorId, title) => {
+  const saved = await recordingSettings().savedOverrideFor(creatorId, { title, mode: 'available' });
+  return saved ? saved.recording : null;
 };
 
 /** A call's recordings (none if the call was never created). */
@@ -226,13 +280,15 @@ const cleanUpChatMediaLater = (target) => {
  */
 const ensureActiveCall = async (liveClass, creator) => {
   let sessionNumber = sessionNumberOf(liveClass.id, liveClass.getstream_call_id);
+  const recording = await autoRecordingFor(liveClass.userId || creator.id, liveClass.title);
 
   // Bounded: one step past an ended call is always a fresh one.
   for (let attempt = 0; attempt < 3; attempt++) {
     const callId = callIdFor(liveClass.id, sessionNumber);
     const ended = await openCall(callId, creator, {
       maxParticipants: liveClass.max_participants,
-      custom: { live_class_id: String(liveClass.id) }
+      custom: { live_class_id: String(liveClass.id) },
+      recording
     });
     if (!ended) return callId;
     sessionNumber += 1;
@@ -298,7 +354,8 @@ const setRecording = async (liveClass, action) => {
   if (liveClass.status !== 'live' || !liveClass.getstream_call_id) {
     throw new GetStreamError('Live class is not currently active', 'SESSION_NOT_ACTIVE', 400);
   }
-  return recordCall(liveClass.getstream_call_id, action);
+  const override = action === 'start' ? await manualRecordingFor(liveClass.userId, liveClass.title) : null;
+  return recordCall(liveClass.getstream_call_id, action, override);
 };
 
 /**
@@ -338,7 +395,8 @@ const startSeriesSession = async (session, series, creator) => {
 
   await openCall(callId, creator, {
     maxParticipants: series.maxParticipants,
-    custom: { live_series_id: String(series.id), live_session_id: callId }
+    custom: { live_series_id: String(series.id), live_session_id: callId },
+    recording: await autoRecordingFor(series.userId || creator.id, series.title)
   });
   await session.update({ status: 'live', actualStartTime: new Date() });
   console.log(`[GetStream] Series session started: ${session.id} (series ${series.id})`);
@@ -367,7 +425,12 @@ const endSeriesSession = async (session) => {
 
 const setSeriesSessionRecording = async (session, action) => {
   if (session.status !== 'live') throw new GetStreamError(SESSION_NOT_LIVE, 'SESSION_NOT_ACTIVE', 400);
-  return recordCall(String(session.id), action);
+  const series = session.series;
+  const override =
+    action === 'start' && series && series.userId
+      ? await manualRecordingFor(series.userId, series.title)
+      : null;
+  return recordCall(String(session.id), action, override);
 };
 
 /** Whether any session of the class was recorded (newest first, stops at the first one found). */

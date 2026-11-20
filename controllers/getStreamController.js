@@ -3,6 +3,7 @@ const Purchase = require('../models/Purchase');
 const User = require('../models/User');
 const { getStreamService, GetStreamError } = require('../services/getStreamService');
 const recordingPublishService = require('../services/recordingPublishService');
+const { recordAttendance } = require('../services/classAttendanceService');
 const getStreamCohostService = require('../services/getStreamCohostService');
 const recordedClassesService = require('../services/recordedClassesService');
 // Shared access rules (privacy, invitation codes, co-hosts). Only read here;
@@ -66,6 +67,7 @@ exports.startSession = async (req, res) => {
 
     const creator = await User.findByPk(req.user.id);
     const result = await getStreamService.startSession(liveClass, creator || { id: req.user.id });
+    recordAttendance({ kind: 'class', targetId: liveClass.id, userId: req.user.id, role: 'host' });
 
     return res.status(200).json({
       success: true,
@@ -120,6 +122,7 @@ exports.joinSession = async (req, res) => {
     const credentials = await getStreamService.joinSession(liveClass, user || { id: userId }, {
       isHost: isCreator || isCohost
     });
+    recordAttendance({ kind: 'class', targetId: liveClass.id, userId, role: isCreator || isCohost ? 'host' : 'participant' });
 
     return res.status(200).json({
       success: true,

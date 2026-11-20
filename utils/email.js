@@ -1983,3 +1983,50 @@ exports.sendLiveClassRescheduledEmail = async (to, firstname, details) => {
     html,
   });
 };
+
+/**
+ * After a live class or series session: a personal link to give feedback.
+ * Hosts and participants get their own wording; the link opens their own
+ * questions (see services/classFeedbackService.js).
+ */
+exports.sendClassFeedbackEmail = async (to, firstname, details) => {
+  const { title: rawTitle, sessionLabel, hostName, url, role } = details;
+  const title = escapeHtml(rawTitle || 'your live class');
+  const what = sessionLabel ? `${title} (${escapeHtml(sessionLabel)})` : title;
+  const host = escapeHtml(String(hostName || 'your host').split(' ')[0]);
+  const isHost = role === 'host';
+
+  const intro = isHost
+    ? `Thanks for hosting <strong>${what}</strong>. How did it go? Tell us in under a minute, and we’ll use it to make your next class even better.`
+    : `Thanks for joining <strong>${what}</strong> with ${host}. How was it? It takes under a minute, and you can send it without your name.`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #1f1f1f; max-width: 520px;">
+      <h2 style="margin: 0 0 12px;">${isHost ? 'How did your class go?' : 'How was the class?'}</h2>
+      <p>Hi ${escapeHtml(firstname || 'there')},</p>
+      <p>${intro}</p>
+
+      <div style="text-align: center; margin: 28px 0;">
+        <a href="${escapeHtml(url)}" style="background: #6a57e5; color: #ffffff; padding: 13px 26px; border-radius: 999px; text-decoration: none; font-weight: bold; display: inline-block;">
+          Share your feedback
+        </a>
+      </div>
+
+      <p style="color: #6b7280; font-size: 13px;">
+        This link is just for you and works for 30 days. If you already shared feedback, you can use it to change your answers.
+      </p>
+
+      <p><strong>The hallos Team</strong></p>
+      ${getSocialFooter()}
+    </div>
+  `;
+
+  await transporter.sendMail({
+    from: `"hallos Team" <${process.env.EMAIL_USER}>`,
+    to,
+    subject: isHost
+      ? `How did ${String(rawTitle || 'your class').slice(0, 100)} go?`
+      : `How was ${String(rawTitle || 'the class').slice(0, 100)}?`,
+    html,
+  });
+};

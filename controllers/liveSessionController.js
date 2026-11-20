@@ -4,6 +4,7 @@ const { zegoCloudService } = require('../services/zegoCloudService');
 const User = require('../models/User');
 const { seriesProviderOf } = require('../utils/liveProviders');
 const { withAvatar } = require('../utils/userAvatar');
+const { recordAttendance } = require('../services/classAttendanceService');
 
 /** These are the ZegoCloud session endpoints; GetStream series use the *-getstream ones. */
 const usesGetStream = (res) =>
@@ -82,7 +83,8 @@ exports.startSession = async (req, res) => {
     });
     
     console.log(`[Live Session Controller] Session ${sessionId} started by user ${userId}`);
-    
+    recordAttendance({ kind: 'session', targetId: session.id, userId, role: 'host' });
+
     return res.status(200).json({
       success: true,
       message: 'Session started successfully',
@@ -248,7 +250,8 @@ exports.joinSession = async (req, res) => {
     );
     
     console.log(`[Live Session Controller] User ${userId} joined session ${sessionId}`);
-    
+    recordAttendance({ kind: 'session', targetId: session.id, userId, role });
+
     return res.status(200).json({
       success: true,
       message: 'Successfully joined session',
