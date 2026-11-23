@@ -140,16 +140,32 @@ async function createDraft({ userId, fileName, sizeBytes, type, durationSeconds,
 }
 
 /**
- * A fresh upload link for a draft whose upload didn't finish (tab closed,
- * link expired, upload failed). Picking the file again continues from here.
+ * The upload link for a draft whose upload didn't finish (connection lost,
+ * tab closed). While Mux still waits for the file, it's the SAME link, so the
+ * browser continues from the bytes already sent. A new link (starting from 0)
+ * only when asked (`fresh`: a different file) or when the old one is no
+ * longer usable (expired, cancelled, errored).
  */
-async function restartUpload({ userId, videoId, origin }) {
+async function restartUpload({ userId, videoId, origin, fresh = false }) {
   requireReady();
   const video = await ownDraft(userId, videoId);
   if (!['uploading', 'failed'].includes(video.status)) {
     throw new DraftError('This video has already been uploaded.', 409, 'ALREADY_UPLOADED');
   }
   const previous = video.muxUploadId;
+  if (!fresh && previous) {
+    const current = await mux().video.uploads.retrieve(previous).catch(() => null);
+    if (current && current.status === 'waiting' && current.url) {
+      if (video.status !== 'uploading') await video.update({ status: 'uploading' });
+      return {
+        videoId: video.id,
+        title: video.title,
+        uploadUrl: current.url,
+        resumed: true,
+        expiresAt: null,
+      };
+    }
+  }
   const upload = await createMuxUpload(origin);
   await video.update({ muxUploadId: upload.id, status: 'uploading' });
   await cancelMuxUpload(previous);
@@ -157,11 +173,12 @@ async function restartUpload({ userId, videoId, origin }) {
     videoId: video.id,
     title: video.title,
     uploadUrl: upload.url,
+    resumed: false,
     expiresAt: new Date(Date.now() + UPLOAD_TIMEOUT_SECONDS * 1000).toISOString(),
   };
 }
 
-const text = (value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
+const text =(value, max) => (typeof value === 'string' ? value.trim().slice(0, max) : '');
 
 /** Publish: save the details. It shows to people once Mux has processed it. */
 async function publish({ userId, videoId, body = {}, thumbnailFile }) {
@@ -216,13 +233,16 @@ async function discard({ userId, videoId }) {
   return { discarded: true };
 }
 
-/** Which of these videos are still drafts (for the creator's own list). */
+/**
+ * The creator's drafts: video id -> the file name being uploaded (so
+ * "Finish" can ask for the same file, which then continues where it stopped).
+ */
 async function draftIdsOf(userId) {
-  if (!isVideoDraftsReady()) return new Set();
-  const [rows] = await sequelize.query('SELECT video_id FROM video_drafts WHERE user_id = :userId', {
+  if (!isVideoDraftsReady()) return new Map();
+  const [rows] = await sequelize.query('SELECT video_id, file_name FROM video_drafts WHERE user_id = :userId', {
     replacements: { userId },
   });
-  return new Set(rows.map((r) => String(r.video_id)));
+  return new Map(rows.map((r) => [String(r.video_id), r.file_name || null]));
 }
 
 module.exports = {

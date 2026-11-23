@@ -32,7 +32,7 @@ const draftIdsSafe = async (userId) => {
     return await require('../services/videoDraftService').draftIdsOf(userId);
   } catch (error) {
     console.warn('[Video Controller] Could not read drafts:', error.message);
-    return new Set();
+    return new Map();
   }
 };
 
@@ -277,6 +277,7 @@ exports.getMyVideos = async (req, res) => {
       const videoData = video.toJSON();
       videoData.pricing = video.getDualPricing();
       videoData.isDraft = draftIds.has(String(video.id));
+      if (videoData.isDraft) videoData.draftFileName = draftIds.get(String(video.id));
       return videoData;
     });
 

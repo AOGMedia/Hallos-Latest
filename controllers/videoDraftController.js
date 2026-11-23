@@ -34,7 +34,13 @@ exports.create = handle(
 
 /** POST /videos/drafts/:id/restart  A fresh upload link for an unfinished upload. */
 exports.restart = handle(
-  (req) => drafts.restartUpload({ userId: req.user.id, videoId: req.params.id, origin: req.get('origin') }),
+  (req) =>
+    drafts.restartUpload({
+      userId: req.user.id,
+      videoId: req.params.id,
+      origin: req.get('origin'),
+      fresh: Boolean(req.body && req.body.fresh === true),
+    }),
   'We couldn’t restart your upload. Please try again.'
 );
 
