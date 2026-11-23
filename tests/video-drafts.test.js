@@ -7,6 +7,7 @@ process.env.CLIENT_URL = 'https://hallos.net';
 const OWNER = 7;
 const mockVideos = new Map();
 const mockDrafts = new Set();
+const mockDraftNames = new Map();
 const mockMux = {
   created: [],
   cancelled: [],
@@ -28,9 +29,11 @@ jest.mock('../config/db', () => ({
   query: jest.fn(async (sql, { replacements: r = {} } = {}) => {
     const s = sql.trim();
     if (s.startsWith('SELECT 1 FROM video_drafts')) return [mockDrafts.has(r.videoId) ? [{ '?column?': 1 }] : []];
-    if (s.startsWith('INSERT INTO video_drafts')) { mockDrafts.add(r.videoId); return [[]]; }
+    if (s.startsWith('INSERT INTO video_drafts')) { mockDrafts.add(r.videoId); mockDraftNames.set(r.videoId, r.fileName); return [[]]; }
     if (s.startsWith('DELETE FROM video_drafts')) { mockDrafts.delete(r.videoId); return [[]]; }
-    if (s.startsWith('SELECT video_id FROM video_drafts')) return [[...mockDrafts].map((video_id) => ({ video_id }))];
+    if (s.startsWith('SELECT video_id, file_name FROM video_drafts')) {
+      return [[...mockDrafts].map((video_id) => ({ video_id, file_name: mockDraftNames.get(video_id) }))];
+    }
     return [[]];
   }),
   transaction: jest.fn(async (fn) => fn({})),
@@ -45,6 +48,10 @@ jest.mock('../config/mux', () => ({
         return upload;
       }),
       cancel: jest.fn(async (id) => { mockMux.cancelled.push(id); }),
+      retrieve: jest.fn(async (id) => {
+        const n = Number(String(id).slice(2));
+        return { id, status: mockMux.uploadStatus, url: `https://storage.mux.test/${n}` };
+      }),
     },
     assets: { delete: jest.fn(async (id) => { mockMux.deletedAssets.push(id); }) },
   },
@@ -68,6 +75,7 @@ beforeEach(() => {
   mockMux.created.length = 0;
   mockMux.cancelled.length = 0;
   mockMux.deletedAssets.length = 0;
+  mockMux.uploadStatus = 'waiting';
   mockReady = true;
 });
 
@@ -175,13 +183,28 @@ describe('discarding and restarting', () => {
     expect(mockVideos.has(videoId)).toBe(true);
   });
 
-  test('restart gives an unfinished upload a fresh link and cancels the old one', async () => {
-    const { videoId } = await drafts.createDraft({ userId: OWNER, fileName: 'clip.mp4', sizeBytes: 100 });
+  test('restart keeps the SAME link while Mux still waits for the file (the upload continues)', async () => {
+    const { videoId, uploadUrl } = await drafts.createDraft({ userId: OWNER, fileName: 'clip.mp4', sizeBytes: 100 });
     mockVideos.get(videoId).status = 'failed';
+    mockMux.uploadStatus = 'waiting';
     const out = await drafts.restartUpload({ userId: OWNER, videoId });
-    expect(out.uploadUrl).toBe('https://storage.mux.test/2');
+    expect(out).toMatchObject({ uploadUrl, resumed: true });
+    expect(mockVideos.get(videoId)).toMatchObject({ muxUploadId: 'up1', status: 'uploading' });
+    expect(mockMux.created).toHaveLength(1);
+    expect(mockMux.cancelled).toEqual([]);
+  });
+
+  test('restart gives a new link when the old one expired, or when asked for a fresh one', async () => {
+    const { videoId } = await drafts.createDraft({ userId: OWNER, fileName: 'clip.mp4', sizeBytes: 100 });
+    mockMux.uploadStatus = 'timed_out';
+    const out = await drafts.restartUpload({ userId: OWNER, videoId });
+    expect(out).toMatchObject({ uploadUrl: 'https://storage.mux.test/2', resumed: false });
     expect(mockVideos.get(videoId)).toMatchObject({ muxUploadId: 'up2', status: 'uploading' });
     expect(mockMux.cancelled).toEqual(['up1']);
+
+    mockMux.uploadStatus = 'waiting';
+    const fresh = await drafts.restartUpload({ userId: OWNER, videoId, fresh: true });
+    expect(fresh).toMatchObject({ uploadUrl: 'https://storage.mux.test/3', resumed: false });
   });
 
   test('restart refuses once the file is already uploaded', async () => {
@@ -194,6 +217,7 @@ describe('discarding and restarting', () => {
 test('draft ids for the creator’s own list', async () => {
   const { videoId } = await drafts.createDraft({ userId: OWNER, fileName: 'clip.mp4', sizeBytes: 100 });
   expect((await drafts.draftIdsOf(OWNER)).has(videoId)).toBe(true);
+  expect((await drafts.draftIdsOf(OWNER)).get(videoId)).toBe('clip.mp4');
   mockReady = false;
   expect((await drafts.draftIdsOf(OWNER)).size).toBe(0);
 });
