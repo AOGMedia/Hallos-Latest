@@ -46,6 +46,21 @@ exports.handleMuxWebhook = async (req, res) => {
     // passthrough); every other event falls through to the handlers below.
     await recordingPublishService.handleMuxAssetEvent(type, data);
 
+    // ---------------- VIDEO UPLOAD EVENTS ----------------
+    // The file arrived: Mux is now processing it. Only moves forward from
+    // "uploading", so a late event never undoes "ready".
+    if (type === "video.upload.asset_created" && data.id) {
+      await Video.update(
+        { status: "processing", ...(data.asset_id ? { muxAssetId: data.asset_id } : {}) },
+        { where: { muxUploadId: data.id, status: "uploading" } }
+      );
+    }
+    // The upload was cancelled or failed on Mux's side: say so instead of
+    // "uploading" forever.
+    if ((type === "video.upload.cancelled" || type === "video.upload.errored") && data.id) {
+      await Video.update({ status: "failed" }, { where: { muxUploadId: data.id, status: "uploading" } });
+    }
+
     // ---------------- VIDEO ASSET EVENTS ----------------
     if (type === "video.asset.ready" && data.upload_id && !data.live_stream_id) {
       const playbackId = data.playback_ids?.[0]?.id || null;
