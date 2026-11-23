@@ -748,8 +748,11 @@ exports.listCommunityContent = async (communityId, requestingUserId, isMember = 
   const attrs = isMember ? null : ['id', 'title', 'thumbnailUrl', 'price', 'currency'];
   const opts = attrs ? { where, attributes: attrs } : { where };
 
+  // Videos never include their Mux ids here: a playback id would let anyone
+  // stream a paid video without buying it.
+  const videoOpts = attrs ? opts : { where, attributes: { exclude: ['muxPlaybackId', 'muxAssetId', 'muxUploadId'] } };
   const [videos, liveClasses, liveSeries, freebies] = await Promise.all([
-    Video.findAll(opts),
+    Video.findAll(videoOpts),
     LiveClass.findAll(opts),
     LiveSeries.findAll(opts),
     Freebie.findAll(opts)

@@ -65,6 +65,7 @@ const { ensureInvestorRelations } = require('./utils/ensureInvestorRelations');
 const { ensureStaffLogins } = require('./utils/ensureStaffLogins');
 const { ensureRecordingPreferences } = require('./utils/ensureRecordingPreferences');
 const { ensureClassFeedback } = require('./utils/ensureClassFeedback');
+const { ensureVideoDrafts } = require('./utils/ensureVideoDrafts');
 const staffActionLogger = require('./middleware/staffActionLogger');
 const LiveClassCleanupService = require('./services/liveClassCleanupService');
 const emailSchedulerService = require('./services/emailSchedulerService');
@@ -296,6 +297,8 @@ sequelize.sync({ force: false })
   .then(() => ensureRecordingPreferences())
   // Same: without it the class feedback form says to try again later.
   .then(() => ensureClassFeedback())
+  // Same: without it video uploads use the classic "upload when you publish" flow.
+  .then(() => ensureVideoDrafts())
   .then(() => {
     const server = app.listen(PORT, () => {
       console.log(`Server running on http://localhost:${PORT}`);

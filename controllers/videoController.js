@@ -26,6 +26,16 @@ const extractUserFromToken = (req) => {
   }
 };
 
+/** The creator's unpublished drafts; never fails a list (no drafts on error). */
+const draftIdsSafe = async (userId) => {
+  try {
+    return await require('../services/videoDraftService').draftIdsOf(userId);
+  } catch (error) {
+    console.warn('[Video Controller] Could not read drafts:', error.message);
+    return new Set();
+  }
+};
+
 exports.uploadVideo = async (req, res) => {
   try {
     const {
@@ -133,9 +143,11 @@ exports.getAllVideos = async (req, res) => {
       order: [['created_at', 'DESC']]
     });
 
-    // Add dual pricing to each video
+    // Add dual pricing to each video. Mux ids stay private: with a playback id
+    // anyone could stream a paid video without buying it (the video page sends
+    // the playback URL only to people with access).
     const videosWithPricing = await attachAuthors(videos.map(video => {
-      const videoData = video.toJSON();
+      const { muxPlaybackId: _p, muxAssetId: _a, muxUploadId: _u, ...videoData } = video.toJSON();
       videoData.pricing = video.getDualPricing();
       return videoData;
     }));
@@ -227,11 +239,13 @@ exports.getUserVideos = async (req, res) => {
       where: { userId: userIdInt },
       order: [['created_at', 'DESC']]
     });
+    const draftIds = await draftIdsSafe(userIdInt);
 
-    // Add dual pricing to each video
+    // Add dual pricing to each video (and mark drafts not yet published)
     const videosWithPricing = videos.map(video => {
       const videoData = video.toJSON();
       videoData.pricing = video.getDualPricing();
+      videoData.isDraft = draftIds.has(String(video.id));
       return videoData;
     });
 
@@ -256,11 +270,13 @@ exports.getMyVideos = async (req, res) => {
       where: { userId },
       order: [['created_at', 'DESC']]
     });
+    const draftIds = await draftIdsSafe(userId);
 
-    // Add dual pricing to each video
+    // Add dual pricing to each video (and mark drafts not yet published)
     const videosWithPricing = videos.map(video => {
       const videoData = video.toJSON();
       videoData.pricing = video.getDualPricing();
+      videoData.isDraft = draftIds.has(String(video.id));
       return videoData;
     });
 
